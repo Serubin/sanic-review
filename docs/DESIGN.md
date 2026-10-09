@@ -793,14 +793,27 @@ fonttools (run through `uv`, which only this task needs) to
 
 - **Index.** The TUI's two lists, "Reviews you owe" and "Your PRs", with
   its statuses, archive toggle and `updated_within_days` window, grouped by
-  what they ask of you. The lists are tabs, one shown at a time: each tab
-  carries its list's count and, when there are any, how many of the
-  filtered rows need you, so a list in the background still says when it
-  wants you. Clicking a tab or `Tab` switches, and the browser remembers
-  the last tab picked (`localStorage`, like the PR page's view); the
-  server renders both lists either way, so the refresh, the filter and
-  every back link are the same on both tabs. Without the script the lists
-  stack. The groups:
+  what they ask of you. The lists are tabs, one shown at a time, each at
+  its own path: `/reviews` and `/prs`. Each tab carries its list's count
+  and, when there are any, how many of the filtered rows need you, so a
+  list in the background still says when it wants you.
+  - The server renders both lists on either path and names the tab on
+    `<html data-tab>`, which the style follows. Clicking a tab or `Tab`
+    switches without a page load and changes the path (a click adds a
+    history entry, `Tab` doesn't), and Back and Forward switch back.
+    Without the script the tabs are plain links.
+  - A bare `/` redirects to the browser's last tab, kept in a
+    `sanic_review_tab` cookie that a tab's page load and a switch both
+    write. A refresh never writes it, nor the address bar's path: the
+    script keeps the path from its own window's tab, so two windows on
+    different tabs, or a refresh sent just before a switch, don't move
+    each other.
+  - A row's or a list's links (archive, review now, the window, the
+    archived toggle) go back to that list's tab, whichever another window
+    last picked. Only a way back with no tab of its own (`q`, the home
+    link, archiving from a PR page) goes to `/`.
+
+  The groups:
   - reviews you owe: **Needs you** (pending drafts, accepted drafts not
     yet posted, every draft rejected with no review of yours on that
     commit, a review you haven't looked at, comments to answer, or a run
@@ -884,9 +897,10 @@ fonttools (run through `uv`, which only this task needs) to
     empty.
   - The server filters, and the filter is the URL's query
     (`?author=alice&state=unseen&q=retry`), so a filtered index is a
-    link. Nothing is kept per browser: a bare `/` is unfiltered. Ticking a
-    value, or typing, rereads the lists in place and puts the filter in
-    the URL. The refresh asks with the same query, so it keeps the filter.
+    link. The filter isn't kept per browser: a bare `/` is unfiltered, on
+    the last tab. Ticking a value, or typing, rereads the lists in place
+    and puts the filter in the URL. The refresh asks with the same query,
+    so it keeps the filter.
     It replaces the facets but not the text box, so typing isn't lost.
   - A filtered list's heading and its group headers say `2 of 8`, and a
     group the filter empties is left out. Under the heading, `N hidden by

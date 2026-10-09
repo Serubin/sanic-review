@@ -531,13 +531,9 @@ details.fmore > summary {
   border-bottom-color: var(--accent);
 }
 
-/* With the script the lists are tabs, one shown at a time, and each tab
-   says what its heading did; without it they stack. */
+/* The lists are tabs, one shown at a time, by the <html>'s data-tab; each
+   tab says what its heading did. */
 .tabs {
-  display: none;
-}
-
-.js .tabs {
   display: flex;
   flex-wrap: wrap;
   gap: 0 1.25rem;
@@ -557,6 +553,7 @@ details.fmore > summary {
   font: inherit;
   font-size: 1.05rem;
   font-weight: 600;
+  text-decoration: none;
   cursor: pointer;
 }
 
@@ -567,36 +564,37 @@ details.fmore > summary {
 
 .tab:hover,
 .tab:focus-visible,
-.js:not([data-tab="mine"]) .tab[data-tab="owed"],
-.js[data-tab="mine"] .tab[data-tab="mine"] {
+html[data-tab="reviews"] .tab[data-tab="reviews"],
+html[data-tab="prs"] .tab[data-tab="prs"] {
   color: var(--fg);
+  text-decoration: none;
 }
 
-.js:not([data-tab="mine"]) .tab[data-tab="owed"],
-.js[data-tab="mine"] .tab[data-tab="mine"] {
+html[data-tab="reviews"] .tab[data-tab="reviews"],
+html[data-tab="prs"] .tab[data-tab="prs"] {
   border-bottom-color: var(--accent);
 }
 
-.js[data-tab="mine"] #owed,
-.js:not([data-tab="mine"]) #mine {
+html[data-tab="prs"] #owed,
+html[data-tab="reviews"] #mine {
   display: none;
 }
 
-.js .list {
+.tabs ~ .list {
   margin-top: 0.5rem;
 }
 
-.js .list > h2 {
+.tabs ~ .list > h2 {
   border-bottom: 0;
   padding-bottom: 0;
 }
 
-.js .list > h2:not(:has(.toggle-archived)) {
+.tabs ~ .list > h2:not(:has(.toggle-archived)) {
   margin: 0;
 }
 
 /* Still a heading to a screen reader. */
-.js .list > h2 .ttl {
+.tabs ~ .list > h2 .ttl {
   position: absolute;
   width: 1px;
   height: 1px;

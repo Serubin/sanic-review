@@ -615,7 +615,7 @@ fn readable(fixture: &Fixture, html: &str) -> String {
 #[tokio::test]
 async fn index_lists_owed_reviews_and_your_prs_like_the_tui() {
     let f = fixture(false).await;
-    let page = f.get("/").await;
+    let page = f.get("/reviews").await;
     assert_eq!(page.status, StatusCode::OK);
     insta::assert_snapshot!(readable(&f, &page.body));
 }
@@ -623,7 +623,7 @@ async fn index_lists_owed_reviews_and_your_prs_like_the_tui() {
 #[tokio::test]
 async fn an_index_row_opens_the_page_its_title_links_to() {
     let f = fixture(false).await;
-    let page = f.get("/").await.body;
+    let page = f.get("/reviews").await.body;
     let rows: Vec<&str> = page.split(" data-row ").skip(1).collect();
     assert!(!rows.is_empty(), "{page}");
     // The script opens a row's `data-href` on a click outside its own
@@ -659,7 +659,7 @@ async fn index_counts_down_waiting_reviews_and_marks_held_ones() {
         key(8),
         Instant::now() + Duration::from_millis(3_600_500),
     )]));
-    let page = f.get("/").await;
+    let page = f.get("/reviews").await;
     assert!(page.body.contains("manual reviews"), "{}", page.body);
     assert!(page.body.contains(r#"<span class="chip held">held</span>"#));
     assert!(page.body.contains("waiting 1:00:00"), "{}", page.body);
@@ -668,11 +668,11 @@ async fn index_counts_down_waiting_reviews_and_marks_held_ones() {
 #[tokio::test]
 async fn a_pr_page_shows_drafts_in_their_diff_and_marks_the_pr_seen() {
     let f = fixture(false).await;
-    assert!(f.get("/").await.body.contains(r#"class="newdot""#));
+    assert!(f.get("/reviews").await.body.contains(r#"class="newdot""#));
     let page = f.get("/pr/org/repo/7").await;
     assert_eq!(page.status, StatusCode::OK);
     insta::assert_snapshot!(readable(&f, &page.body));
-    assert!(!f.get("/").await.body.contains(r#"class="newdot""#));
+    assert!(!f.get("/reviews").await.body.contains(r#"class="newdot""#));
 
     assert_eq!(f.get("/pr/org/repo/99").await.status, StatusCode::NOT_FOUND);
 }
@@ -758,7 +758,7 @@ async fn state_changes_need_the_token_and_the_dashboards_own_origin() {
         .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
     refused(f.send(other_port.body(encode(&good)).unwrap()).await);
     // DNS rebinding: the page reads the dashboard under another name.
-    let rebound = Request::get("/")
+    let rebound = Request::get("/reviews")
         .header(header::HOST, "evil.example:7117")
         .body(Body::empty())
         .unwrap();
@@ -1151,7 +1151,7 @@ async fn a_run_with_no_update_is_listed_with_the_drafts_it_carried() {
     // The run before's drafts, carried to it, still to decide on.
     assert!(page.contains("Run 2 of 2"), "{page}");
     assert!(page.contains("Mostly fine."), "{page}");
-    let index = f.get("/").await.body;
+    let index = f.get("/reviews").await.body;
     assert!(
         index.contains("no update since the review it resumed"),
         "{index}"
@@ -1465,7 +1465,7 @@ async fn pending_in_top_bar(f: &Fixture, uri: &str) -> String {
 async fn the_top_bar_counts_the_pending_drafts_the_lists_show() {
     let f = fixture(false).await;
     // PR 7's review: its summary and both comments.
-    assert_eq!(pending_in_top_bar(&f, "/").await, "3");
+    assert_eq!(pending_in_top_bar(&f, "/reviews").await, "3");
     assert_eq!(pending_in_top_bar(&f, "/pr/org/repo/8").await, "3");
     // Older than the recency window, it's off the lists, and out of the
     // count until a window wide enough is picked.
@@ -1478,13 +1478,13 @@ async fn the_top_bar_counts_the_pending_drafts_the_lists_show() {
         .store()
         .record(&old, "me", "default", &[])
         .unwrap();
-    assert_eq!(pending_in_top_bar(&f, "/").await, "0");
+    assert_eq!(pending_in_top_bar(&f, "/reviews").await, "0");
     f.post("/window", &[("window", "all")]).await;
-    assert_eq!(pending_in_top_bar(&f, "/").await, "3");
+    assert_eq!(pending_in_top_bar(&f, "/reviews").await, "3");
     // Archived, it's counted only where archived PRs are shown.
     f.dashboard.app.store().set_archived(&key(7), true).unwrap();
-    assert_eq!(pending_in_top_bar(&f, "/").await, "0");
-    assert_eq!(pending_in_top_bar(&f, "/?archived=true").await, "3");
+    assert_eq!(pending_in_top_bar(&f, "/reviews").await, "0");
+    assert_eq!(pending_in_top_bar(&f, "/reviews?archived=true").await, "3");
     assert_eq!(pending_in_top_bar(&f, "/pr/org/repo/8").await, "0");
     f.dashboard
         .app
@@ -1493,7 +1493,7 @@ async fn the_top_bar_counts_the_pending_drafts_the_lists_show() {
         .unwrap();
     // Closed, it's off the lists, and out of the count.
     f.dashboard.app.store().mark_closed(&key(7)).unwrap();
-    assert_eq!(pending_in_top_bar(&f, "/?archived=true").await, "0");
+    assert_eq!(pending_in_top_bar(&f, "/reviews?archived=true").await, "0");
 }
 
 /// Each group heading's text, without what its `<span>` adds.
@@ -1511,10 +1511,10 @@ fn headings(index: &str) -> Vec<String> {
 #[tokio::test]
 async fn the_sidebar_filters_the_lists_from_the_query() {
     let f = fixture(false).await;
-    let page = f.get("/?author=Alice&q=").await;
+    let page = f.get("/reviews?author=Alice&q=").await;
     assert_eq!(page.status, StatusCode::OK);
-    // The address bar gets the filter as the index writes it.
-    assert_eq!(page.headers["hx-replace-url"], "/?author=Alice");
+    // The script keeps the address bar, on whichever tab its window shows.
+    assert!(!page.headers.contains_key("hx-replace-url"));
     let index = page.body;
     assert!(index.contains("Add the thing"), "{index}");
     assert!(!index.contains("Fix &lt;script&gt; escaping") && !index.contains("WIP: try things"));
@@ -1522,25 +1522,28 @@ async fn the_sidebar_filters_the_lists_from_the_query() {
         index.contains(r#"<span class="ttl">Reviews you owe <span class="dim">1 of 3</span>"#),
         "{index}"
     );
-    assert!(index.contains(r#"<b>2</b> hidden by filter · <a class="fclear" href="/">clear</a>"#));
+    assert!(
+        index
+            .contains(r#"<b>2</b> hidden by filter · <a class="fclear" href="/reviews">clear</a>"#)
+    );
     // Your PRs are all yours: author leaves them be, and says so.
     assert!(index.contains("My change"));
     assert!(index.contains(r#"<span class="ttl">Your PRs <span class="dim">1</span>"#));
-    // The tabs count as the headings do, and say only of a list with any
-    // how many need you.
+    // The tabs link to their paths with the filter, count as the headings
+    // do, and say only of a list with any how many need you.
     assert!(
         index.contains(
-            r#"data-tab="owed" aria-controls="owed" aria-pressed="false">Reviews you owe <span class="dim">1 of 3</span> <span class="chip u-act">1 needs you</span></button>"#
+            r#"<a class="tab" href="/reviews?author=Alice" data-tab="reviews" aria-controls="owed" aria-current="page">Reviews you owe <span class="dim">1 of 3</span> <span class="chip u-act">1 needs you</span></a>"#
         ),
         "{index}"
     );
     assert!(index.contains(
-        r#"data-tab="mine" aria-controls="mine" aria-pressed="false">Your PRs <span class="dim">1</span></button>"#
+        r#"<a class="tab" href="/prs?author=Alice" data-tab="prs" aria-controls="mine">Your PRs <span class="dim">1</span></a>"#
     ));
     assert!(index.contains("author isn't applied here: these are all yours"));
     assert_eq!(headings(&index), ["NEEDS YOU · 1 of 2", "READY · 1"]);
     // The refresh asks for the same, and the tick is kept.
-    assert!(index.contains(r#"<div id="panes" hx-get="/?author=Alice""#));
+    assert!(index.contains(r#"<div id="panes" hx-get="/reviews?author=Alice""#));
     assert!(
         index.contains(r#"name="author" value="alice" checked>"#),
         "{index}"
@@ -1551,7 +1554,7 @@ async fn the_sidebar_filters_the_lists_from_the_query() {
     // Folded over the lists, the heading says what's picked, in the
     // sidebar's order, the words last.
     let picked = f
-        .get("/?q=retry&state=unseen&reviewer=me&status=ready")
+        .get("/reviews?q=retry&state=unseen&reviewer=me&status=ready")
         .await
         .body;
     assert!(
@@ -1561,9 +1564,9 @@ async fn the_sidebar_filters_the_lists_from_the_query() {
     // PR 7's pending drafts are all of them.
     assert!(index.contains(r#"<b class="cnt">3</b> of <b>3</b> pending drafts"#));
 
-    let index = f.get("/?state=mergeable").await.body;
+    let index = f.get("/reviews?state=mergeable").await.body;
     assert!(index.contains(r#"<span class="ttl">Reviews you owe <span class="dim">0 of 3</span>"#));
-    assert!(index.contains(r#"Reviews you owe <span class="dim">0 of 3</span></button>"#));
+    assert!(index.contains(r#"Reviews you owe <span class="dim">0 of 3</span></a>"#));
     assert!(index.contains("<b>3</b> hidden by filter"));
     assert_eq!(headings(&index), ["READY · 1"]);
     assert!(index.contains(r#"<b class="cnt">0</b> of <b>3</b> pending drafts"#));
@@ -1572,36 +1575,110 @@ async fn the_sidebar_filters_the_lists_from_the_query() {
     assert!(alice[..alice.find("</label>").unwrap()].contains(r#"<span class="fn">0</span>"#));
 
     // Words match the title or the ref.
-    let index = f.get("/?q=%239").await.body;
+    let index = f.get("/reviews?q=%239").await.body;
     assert!(index.contains("My change") && !index.contains("Add the thing"));
-    let index = f.get("/?q=escaping+FIX").await.body;
+    let index = f.get("/reviews?q=escaping+FIX").await.body;
     assert!(index.contains("Fix &lt;script&gt; escaping") && !index.contains("Add the thing"));
 
     // Unknown keys are left out; a bad archived is a bad request.
-    assert_eq!(f.get("/?nope=1").await.headers["hx-replace-url"], "/");
     assert_eq!(
-        f.get("/?archived=maybe").await.status,
-        StatusCode::BAD_REQUEST
+        f.get("/?nope=1").await.headers[header::LOCATION],
+        "/reviews"
     );
+    for uri in ["/reviews?archived=maybe", "/?archived=maybe"] {
+        assert_eq!(f.get(uri).await.status, StatusCode::BAD_REQUEST, "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn each_tab_has_a_path_and_slash_goes_to_the_last_one() {
+    let f = fixture(false).await;
+    let get = |uri: &'static str, headers: &'static [(&'static str, &'static str)]| {
+        let mut request = Request::get(uri).header(header::HOST, HOST);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        f.send(request.body(Body::empty()).unwrap())
+    };
+    let cookie =
+        |tab: &str| format!("sanic_review_tab={tab}; Path=/; SameSite=Lax; Max-Age=31536000");
+
+    // A tab's page names its tab and remembers it for `/`.
+    for (uri, tab) in [("/reviews", "reviews"), ("/prs?author=bob", "prs")] {
+        let page = get(uri, &[]).await;
+        assert_eq!(page.status, StatusCode::OK, "{uri}");
+        assert!(
+            page.body
+                .contains(&format!(r#"<html lang="en" data-tab="{tab}">"#)),
+            "{uri}"
+        );
+        assert_eq!(page.headers[header::SET_COOKIE], cookie(tab), "{uri}");
+    }
+    // A refresh or the filter doesn't: one sent before a switch would undo it.
+    let refresh = get("/prs", &[("hx-request", "true")]).await;
+    assert_eq!(refresh.status, StatusCode::OK);
+    assert!(!refresh.headers.contains_key(header::SET_COOKIE));
+
+    // `/` goes to the last tab, keeping the query; Reviews you owe without one.
+    let to = |reply: Reply| {
+        assert_eq!(reply.status, StatusCode::SEE_OTHER);
+        assert_eq!(reply.headers[header::CACHE_CONTROL], "no-store");
+        reply.headers[header::LOCATION].to_str().unwrap().to_owned()
+    };
+    assert_eq!(to(get("/?author=bob", &[]).await), "/reviews?author=bob");
+    assert_eq!(
+        to(get("/", &[("cookie", "sanic_review_tab=prs")]).await),
+        "/prs"
+    );
+    // Junk is the default, and the first that names a tab wins.
+    assert_eq!(
+        to(get("/", &[("cookie", "a=b; sanic_review_tab=\"prs\"")]).await),
+        "/reviews"
+    );
+    assert_eq!(
+        to(get(
+            "/",
+            &[(
+                "cookie",
+                "sanic_review_tab=nope; sanic_review_tab=prs; sanic_review_tab=reviews"
+            )]
+        )
+        .await),
+        "/prs"
+    );
+
+    // Your PRs' rows go back to their tab from the other one too.
+    let reviews = get("/reviews", &[]).await.body;
+    let mine = &reviews[reviews.find(r#"<section class="list" id="mine">"#).unwrap()..];
+    assert!(
+        mine.contains(r#"<input type="hidden" name="back" value="/prs">"#),
+        "{mine}"
+    );
+    assert!(!mine.contains(r#"value="/reviews""#));
+    // Other pages have no tab, and don't touch the last one.
+    let pr = get("/pr/org/repo/8", &[]).await;
+    assert!(pr.body.contains(r#"<html lang="en">"#));
+    assert!(!pr.headers.contains_key(header::SET_COOKIE));
 }
 
 #[tokio::test]
 async fn archiving_and_review_now_from_a_filtered_index_go_back_to_it() {
     let f = fixture(false).await;
-    let index = f.get("/?author=bob").await.body;
-    assert!(index.contains(r#"<input type="hidden" name="back" value="/?author=bob">"#));
-    assert!(index.contains(r#"data-archived-href="/?archived=true&amp;author=bob""#));
+    // Even on the other tab, a row goes back to its own list's.
+    let index = f.get("/prs?author=bob").await.body;
+    assert!(index.contains(r#"<input type="hidden" name="back" value="/reviews?author=bob">"#));
+    assert!(index.contains(r#"data-archived-href="/prs?archived=true&amp;author=bob""#));
     let reply = f
         .post(
             "/pr/org/repo/8/archive",
             &[
                 ("archived", "true"),
                 ("next", "index"),
-                ("back", "/?author=bob"),
+                ("back", "/reviews?author=bob"),
             ],
         )
         .await;
-    assert_eq!(reply.headers[header::LOCATION], "/?author=bob");
+    assert_eq!(reply.headers[header::LOCATION], "/reviews?author=bob");
     f.post(
         "/pr/org/repo/8/archive",
         &[("archived", "false"), ("next", "index")],
@@ -1610,10 +1687,13 @@ async fn archiving_and_review_now_from_a_filtered_index_go_back_to_it() {
     let reply = f
         .post(
             "/pr/org/repo/8/review-now",
-            &[("next", "index"), ("back", "/?author=bob&q=escaping")],
+            &[("next", "index"), ("back", "/prs?author=bob&q=escaping")],
         )
         .await;
-    assert_eq!(reply.headers[header::LOCATION], "/?author=bob&q=escaping");
+    assert_eq!(
+        reply.headers[header::LOCATION],
+        "/prs?author=bob&q=escaping"
+    );
 }
 
 #[tokio::test]
@@ -1627,14 +1707,14 @@ async fn archiving_writes_the_store_and_the_index_hides_archived_prs() {
         .await;
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
     assert_eq!(reply.headers[header::LOCATION], "/");
-    let index = f.get("/").await.body;
+    let index = f.get("/reviews").await.body;
     assert!(!index.contains("Fix &lt;script&gt; escaping"));
     assert!(
         index.contains(r#"<span class="ttl">Reviews you owe <span class="dim">2</span>"#)
             && index.contains("show 1 archived"),
         "{index}"
     );
-    let all = f.get("/?archived=true").await.body;
+    let all = f.get("/reviews?archived=true").await.body;
     assert!(all.contains("Fix &lt;script&gt; escaping"));
     assert!(all.contains(r#"<span class="chip dim">archived</span>"#));
 
@@ -1646,7 +1726,7 @@ async fn archiving_writes_the_store_and_the_index_hides_archived_prs() {
         .await;
     assert_eq!(reply.headers[header::LOCATION], "/pr/org/repo/8");
     assert!(
-        f.get("/")
+        f.get("/reviews")
             .await
             .body
             .contains("Fix &lt;script&gt; escaping")
@@ -1683,7 +1763,7 @@ async fn assets_are_embedded() {
     let bytes = font.into_body().collect().await.unwrap().to_bytes();
     assert!(bytes.starts_with(b"wOF2"));
     // And the pages may load it.
-    let page = f.get("/").await;
+    let page = f.get("/reviews").await;
     let csp = page.headers[header::CONTENT_SECURITY_POLICY]
         .to_str()
         .unwrap();
@@ -1722,7 +1802,7 @@ async fn pages_another_site_opens_are_only_a_link_to_themselves() {
     }
     // Nor does it mark a PR seen.
     f.send(opened("/pr/org/repo/7", "cross-site")).await;
-    assert!(f.get("/").await.body.contains(r#"class="newdot""#));
+    assert!(f.get("/reviews").await.body.contains(r#"class="newdot""#));
     // Typed or bookmarked, or followed from the dashboard, it's the page.
     for site in ["none", "same-origin"] {
         let reply = f.send(opened(&preview, site)).await;
@@ -1911,7 +1991,7 @@ async fn prs_by_skipped_authors_are_unlisted_but_their_pages_work() {
                 [profile.vuln]\nrepos = [{ github = \"sec\" }]\n";
     let config = Config::parse(text, std::path::Path::new("/"), &NoCheckouts).unwrap();
     let row = r#"data-key="org/repo#7""#;
-    let index = f.get("/").await.body;
+    let index = f.get("/reviews").await.body;
     assert!(index.contains(row), "{index}");
     assert!(
         index.contains(r#"<b class="cnt">3</b> pending drafts"#),
@@ -1919,7 +1999,7 @@ async fn prs_by_skipped_authors_are_unlisted_but_their_pages_work() {
     );
 
     f.skips.send_replace(config.skip_rules());
-    let index = f.get("/").await.body;
+    let index = f.get("/reviews").await.body;
     assert!(!index.contains(row), "{index}");
     assert!(
         index.contains(r#"<b class="cnt">0</b> pending drafts"#),
@@ -1953,7 +2033,7 @@ async fn prs_by_skipped_authors_are_unlisted_but_their_pages_work() {
     assert_eq!(*f.serve.started.lock().unwrap(), [key(7)]);
 
     f.skips.send_replace(skip_rules());
-    let index = f.get("/").await.body;
+    let index = f.get("/reviews").await.body;
     assert!(index.contains(row), "{index}");
     let page = f.get("/pr/org/repo/7").await.body;
     assert!(page.contains("Ignore by title"), "{page}");
@@ -2015,7 +2095,7 @@ async fn firefoxs_same_origin_form_post_with_a_null_origin_is_accepted() {
 #[tokio::test]
 async fn pages_set_a_same_origin_referrer_policy() {
     let f = fixture(false).await;
-    let reply = f.get("/").await;
+    let reply = f.get("/reviews").await;
     assert_eq!(reply.headers[header::REFERRER_POLICY], "same-origin");
 }
 
@@ -2054,7 +2134,7 @@ async fn reviewing_an_already_reviewed_head_again_says_by_whom() {
         .record(&snap, "me", "default", &[])
         .unwrap();
 
-    let index = f.get("/").await.body;
+    let index = f.get("/reviews").await.body;
     assert!(
         index.contains(r#"data-review-now="/pr/org/repo/11/review-now""#),
         "{index}"
@@ -2118,7 +2198,7 @@ async fn a_chat_under_a_profile_since_removed_says_why_instead_of_a_command() {
 #[tokio::test]
 async fn prs_show_where_they_stand_as_in_the_tui() {
     let f = fixture(false).await;
-    let index = f.get("/").await.body;
+    let index = f.get("/reviews").await.body;
     for cell in [
         // PR 7 leads with its drafts, and says the rest after.
         ">1 to answer</span>",
@@ -2169,7 +2249,7 @@ async fn prs_show_where_they_stand_as_in_the_tui() {
         &[("archived", "true"), ("next", "index")],
     )
     .await;
-    let all = f.get("/?archived=true").await.body;
+    let all = f.get("/reviews?archived=true").await.body;
     assert!(
         all.contains(r#"<span class="chip dim">archived</span><span class="pop""#),
         "{all}"
@@ -2197,7 +2277,7 @@ async fn the_index_groups_rows_by_what_they_ask_of_you() {
             })
             .unwrap();
     }
-    let index = f.get("/").await.body;
+    let index = f.get("/reviews").await.body;
     let group = |title: &str| group_of(&index, title);
     assert_eq!(group("Add the thing"), "NEEDS YOU", "{index}");
     assert_eq!(group("Fix &lt;script&gt; escaping"), "NEEDS YOU");
@@ -2215,7 +2295,7 @@ async fn the_index_groups_rows_by_what_they_ask_of_you() {
         key(8),
         Instant::now() + Duration::from_secs(60),
     )]));
-    let index = f.get("/").await.body;
+    let index = f.get("/reviews").await.body;
     assert_eq!(
         group_of(&index, "Fix &lt;script&gt; escaping"),
         "IN FLIGHT",
@@ -2338,7 +2418,7 @@ async fn decided_drafts_and_blocked_approvals_are_grouped_by_whose_move_it_is() 
     };
     reviewed_pr(&f, &reviewed, &["rejected"]);
 
-    let index = f.get("/").await.body;
+    let index = f.get("/reviews").await.body;
     for (title, group) in [
         ("Mine, ci failing", "NEEDS YOU"),
         ("Mine, conflicts", "NEEDS YOU"),
@@ -2367,7 +2447,7 @@ async fn decided_drafts_and_blocked_approvals_are_grouped_by_whose_move_it_is() 
         key(32),
         Instant::now() + Duration::from_secs(60),
     )]));
-    let index = f.get("/").await.body;
+    let index = f.get("/reviews").await.body;
     assert_eq!(group_of(&index, "All rejected"), "IN FLIGHT");
     assert!(!index.contains("submit review"), "{index}");
 }
@@ -2454,7 +2534,7 @@ async fn rows_say_who_reviewed_with_their_verdicts() {
             store.record(&snap, "me", "default", &[]).unwrap();
         }
     }
-    let index = f.get("/").await.body;
+    let index = f.get("/reviews").await.body;
     assert_eq!(reviewed_by(&index, "Add the thing"), "no reviews");
     for (number, _, words) in &cases {
         assert_eq!(reviewed_by(&index, &format!("PR {number}")), *words);
@@ -2523,7 +2603,7 @@ async fn rows_say_what_waits_on_the_author_or_the_reviewer() {
         store.record(&owed, "me", "default", &[]).unwrap();
         store.record(&mine, "me", "default", &[]).unwrap();
     }
-    let index = f.get("/").await.body;
+    let index = f.get("/reviews").await.body;
     assert!(
         index.contains(
             r#"<span class="sig them" title="your comments the author hasn't answered">2 awaiting <b>@dave</b></span>"#
@@ -2539,13 +2619,13 @@ async fn rows_say_what_waits_on_the_author_or_the_reviewer() {
 async fn the_hidden_count_offers_wider_windows_until_reset() {
     let f = fixture(false).await;
     // Nothing counted yet: nothing to say.
-    assert!(!f.get("/").await.body.contains("hidden-foot"));
+    assert!(!f.get("/reviews").await.body.contains("hidden-foot"));
     f.dashboard
         .app
         .store()
         .set_hidden(sanic_store::List::Owed, 14, 9)
         .unwrap();
-    let index = f.get("/").await.body;
+    let index = f.get("/reviews").await.body;
     let foot = &index[index.find(r#"<div class="hidden-foot">"#).unwrap()..];
     let foot = &foot[..foot.find("</div>").unwrap()];
     assert!(
@@ -2572,7 +2652,7 @@ async fn the_hidden_count_offers_wider_windows_until_reset() {
     let picked = f.post("/window", &[("window", "180")]).await;
     assert_eq!(picked.status, StatusCode::SEE_OTHER);
     assert_eq!(picked.headers[header::LOCATION], "/");
-    let index = f.get("/").await.body;
+    let index = f.get("/reviews").await.body;
     assert!(index.contains("showing the last 180 days"), "{index}");
     assert!(index.contains(">all</button>"));
     assert!(!index.contains(">1 month</button>"));
@@ -2585,22 +2665,23 @@ async fn the_hidden_count_offers_wider_windows_until_reset() {
         StatusCode::CONFLICT
     );
     // Picked with archived PRs shown and a filter, the index is as it was.
-    let filtered = f.get("/?author=bob&archived=true").await.body;
-    assert!(
-        filtered.contains(
-            r#"<input type="hidden" name="back" value="/?archived=true&amp;author=bob">"#
-        )
-    );
+    let filtered = f.get("/reviews?author=bob&archived=true").await.body;
+    assert!(filtered.contains(
+        r#"<input type="hidden" name="back" value="/prs?archived=true&amp;author=bob">"#
+    ));
     let back = f
         .post(
             "/window",
             &[
                 ("window", "default"),
-                ("back", "/?archived=true&author=bob"),
+                ("back", "/prs?archived=true&author=bob"),
             ],
         )
         .await;
-    assert_eq!(back.headers[header::LOCATION], "/?archived=true&author=bob");
+    assert_eq!(
+        back.headers[header::LOCATION],
+        "/prs?archived=true&author=bob"
+    );
     // Sent anywhere else, it's the index.
     let elsewhere = f
         .post(
@@ -2609,7 +2690,7 @@ async fn the_hidden_count_offers_wider_windows_until_reset() {
         )
         .await;
     assert_eq!(elsewhere.headers[header::LOCATION], "/");
-    let index = f.get("/").await.body;
+    let index = f.get("/reviews").await.body;
     assert!(index.contains("9 older PRs hidden"));
     assert!(!index.contains("back to default"));
 }
@@ -2617,7 +2698,7 @@ async fn the_hidden_count_offers_wider_windows_until_reset() {
 #[tokio::test]
 async fn settings_switch_manual_reviews_asking_how_many_held_ones_start() {
     let f = fixture(true).await;
-    let index = f.get("/").await.body;
+    let index = f.get("/reviews").await.body;
     assert!(
         index.contains(r#"<a class="held" href="/settings">manual reviews</a>"#),
         "{index}"
@@ -2678,7 +2759,7 @@ async fn settings_switch_manual_reviews_asking_how_many_held_ones_start() {
         done.body
     );
     assert!(!f.dashboard.app.manual_reviews().runner);
-    assert!(!f.get("/").await.body.contains(">manual reviews</a>"));
+    assert!(!f.get("/reviews").await.body.contains(">manual reviews</a>"));
     // Off as the reload last said, a post turning them off still asks
     // about what's queued: its page may predate a switch the reload
     // hasn't shown yet.
@@ -2767,7 +2848,7 @@ async fn held_goes_by_the_profile_the_run_was_queued_under_not_the_prs() {
     // Moved into `vuln` after it was queued: the worker runs it by
     // itself, so it's queued, with nothing to start.
     queue_then_move("h2", "default", "vuln");
-    let row = row_of_8(&f.get("/").await.body);
+    let row = row_of_8(&f.get("/reviews").await.body);
     assert!(row.contains("it starts when a slot is free"), "{row}");
     assert!(!row.contains("review-now"), "{row}");
     let reply = f.post("/pr/org/repo/8/review-now", &[]).await;
@@ -2775,7 +2856,7 @@ async fn held_goes_by_the_profile_the_run_was_queued_under_not_the_prs() {
 
     // Moved out of `vuln`: its run is still held, and Review now starts it.
     queue_then_move("h3", "vuln", "default");
-    let row = row_of_8(&f.get("/").await.body);
+    let row = row_of_8(&f.get("/reviews").await.body);
     assert!(
         row.contains(r#"<span class="chip held">held</span>"#),
         "{row}"
@@ -2821,7 +2902,7 @@ async fn profiles_overriding_manual_reviews_hold_their_own_and_are_listed() {
 
     // With the runner's off, the badge names the profile that holds, and
     // only its PR's run reads as held.
-    let index = f.get("/").await.body;
+    let index = f.get("/reviews").await.body;
     assert!(
         index.contains(r#"<a class="held" href="/settings">manual reviews: vuln</a>"#),
         "{index}"
@@ -2856,7 +2937,7 @@ async fn profiles_overriding_manual_reviews_hold_their_own_and_are_listed() {
         card_of(&confirm).contains("1 held review will start. Continue?"),
         "{confirm}"
     );
-    let index = f.get("/").await.body;
+    let index = f.get("/reviews").await.body;
     assert!(
         index.contains(r#"<a class="held" href="/settings">manual reviews</a>"#),
         "{index}"
@@ -4937,7 +5018,7 @@ async fn the_queue_says_so_when_nothing_is_queued() {
 #[tokio::test]
 async fn the_top_bar_links_the_queue() {
     let f = fixture(false).await;
-    let index = f.get("/").await;
+    let index = f.get("/reviews").await;
     assert!(index.body.contains("href=\"/queue\""), "{}", index.body);
 }
 
@@ -5088,7 +5169,7 @@ async fn a_cancelled_run_reads_cancelled_and_can_be_started_again() {
             .id
     };
     f.store().cancel_run(run).unwrap();
-    let index = f.get("/").await;
+    let index = f.get("/reviews").await;
     assert!(index.body.contains("cancelled"), "{}", index.body);
     let ask = f.get("/pr/org/repo/8/review-now").await;
     assert_eq!(ask.status, StatusCode::OK);

@@ -204,9 +204,44 @@ fn same(facet: Facet, a: &str, b: &str) -> bool {
     }
 }
 
-/// The index's URL query: whether archived PRs show, and the filter.
+/// One of the index's two lists, each at its own path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tab {
+    /// Reviews you owe.
+    Reviews,
+    /// Your PRs.
+    Prs,
+}
+
+impl Tab {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Reviews => "reviews",
+            Self::Prs => "prs",
+        }
+    }
+
+    pub fn path(self) -> &'static str {
+        match self {
+            Self::Reviews => "/reviews",
+            Self::Prs => "/prs",
+        }
+    }
+
+    pub fn of_str(name: &str) -> Option<Self> {
+        match name {
+            "reviews" => Some(Self::Reviews),
+            "prs" => Some(Self::Prs),
+            _ => None,
+        }
+    }
+}
+
+/// The index's URL: which tab, whether archived PRs show, and the filter.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IndexQuery {
+    /// `None` is `/`, which goes to the browser's last tab.
+    pub tab: Option<Tab>,
     pub archived: bool,
     pub filter: Filter,
 }
@@ -252,19 +287,27 @@ impl IndexQuery {
     /// it; the unfiltered index for anything else, so the redirect it
     /// makes stays on the index.
     pub fn from_href(href: Option<&str>) -> Self {
-        let Some(query) = href.and_then(|h| h.strip_prefix('/')) else {
+        let Some(href) = href else {
             return Self::default();
         };
-        if query.is_empty() {
-            return Self::default();
+        let (path, query) = href
+            .split_once('?')
+            .map_or((href, None), |(path, query)| (path, Some(query)));
+        let tab = match path {
+            "/" => None,
+            "/reviews" => Some(Tab::Reviews),
+            "/prs" => Some(Tab::Prs),
+            _ => return Self::default(),
+        };
+        let parsed = query.and_then(|q| Self::parse(Some(q)).ok());
+        Self {
+            tab,
+            ..parsed.unwrap_or_default()
         }
-        query
-            .strip_prefix('?')
-            .and_then(|q| Self::parse(Some(q)).ok())
-            .unwrap_or_default()
     }
 
-    /// The index's URL for this query: `/` when there's nothing to say.
+    /// The index's URL for this query: just the path when there's nothing
+    /// else to say.
     pub fn href(&self) -> String {
         let mut pairs: Vec<(&str, &str)> = Vec::new();
         if self.archived {
@@ -277,23 +320,31 @@ impl IndexQuery {
         if !text.is_empty() {
             pairs.push(("q", text));
         }
+        let path = self.tab.map_or("/", Tab::path);
         match serde_urlencoded::to_string(&pairs) {
-            Ok(query) if !query.is_empty() => format!("/?{query}"),
-            _ => "/".into(),
+            Ok(query) if !query.is_empty() => format!("{path}?{query}"),
+            _ => path.into(),
         }
     }
 
     pub fn with_archived(&self, archived: bool) -> Self {
         Self {
             archived,
-            filter: self.filter.clone(),
+            ..self.clone()
         }
     }
 
     pub fn unfiltered(&self) -> Self {
         Self {
-            archived: self.archived,
             filter: Filter::default(),
+            ..self.clone()
+        }
+    }
+
+    pub fn in_tab(&self, tab: Tab) -> Self {
+        Self {
+            tab: Some(tab),
+            ..self.clone()
         }
     }
 }
@@ -338,9 +389,12 @@ struct Choice {
 /// value or type. The lists' refresh replaces [`facets`] and the count in
 /// its heading, never the text box, so typing isn't lost.
 pub fn sidebar(query: &IndexQuery, rows: &[RowValues], me: &str) -> Markup {
+    // The page's own tab, not `/`, whose redirect follows the cookie another
+    // window may have moved.
+    let path = query.tab.map_or("/", Tab::path);
     html! {
-        form #filter .fside method="get" action="/" role="search" aria-label="Filter the lists"
-            hx-get="/" hx-trigger="change, submit" hx-target="#panes" hx-select="#panes"
+        form #filter .fside method="get" action=(path) role="search" aria-label="Filter the lists"
+            hx-get=(path) hx-trigger="change, submit" hx-target="#panes" hx-select="#panes"
             hx-select-oob=(REFRESHED) hx-swap="outerHTML" hx-sync="#panes:replace" {
             // Open, and always so on a wide window; the script folds it on
             // a narrow one.
@@ -354,7 +408,7 @@ pub fn sidebar(query: &IndexQuery, rows: &[RowValues], me: &str) -> Markup {
                     input #fq type="search" name="q" value=(query.filter.text)
                         placeholder="title or #number" autocomplete="off"
                         aria-label="words in the title or owner/name#N"
-                        hx-get="/" hx-trigger="input changed delay:250ms, search"
+                        hx-get=(path) hx-trigger="input changed delay:250ms, search"
                         hx-include="#filter";
                     @if query.archived { input type="hidden" name="archived" value="true"; }
                     // Without the script's htmx, a plain GET.
@@ -565,6 +619,8 @@ mod tests {
             "https://elsewhere.example/?author=x",
             "//elsewhere.example/",
             "?author=x",
+            "/reviewsx?author=x",
+            "/prs/../elsewhere",
         ] {
             assert_eq!(IndexQuery::from_href(Some(href)).href(), "/", "{href}");
         }
@@ -572,6 +628,19 @@ mod tests {
             IndexQuery::from_href(Some("/?author=x&nope=1")).href(),
             "/?author=x"
         );
+        // A tab's path is kept, so the redirect goes back to that tab.
+        let q = IndexQuery::from_href(Some("/prs?author=x"));
+        assert_eq!(
+            (q.tab, q.href().as_str()),
+            (Some(Tab::Prs), "/prs?author=x")
+        );
+        assert_eq!(IndexQuery::from_href(Some("/reviews")).href(), "/reviews");
+        // A query that doesn't parse leaves the tab.
+        assert_eq!(
+            IndexQuery::from_href(Some("/prs?archived=maybe")).href(),
+            "/prs"
+        );
+        assert_eq!(IndexQuery::from_href(Some("/")).tab, None);
     }
 
     #[test]
