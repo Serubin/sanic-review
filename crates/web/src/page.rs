@@ -11,6 +11,7 @@ use serde_json::json;
 
 use crate::{
     App,
+    filter::Tab,
     guard::{TOKEN_FIELD, TOKEN_HEADER},
 };
 
@@ -19,8 +20,9 @@ use crate::{
 pub enum Kind {
     /// The index, and whether it shows archived PRs: only then does the top
     /// bar count their pending drafts. `pending` is those of the rows a
-    /// filter leaves, while one is in use.
+    /// filter leaves, while one is in use. `tab` is the list it shows.
     Index {
+        tab: Tab,
         archived: bool,
         pending: Option<u32>,
     },
@@ -89,9 +91,13 @@ pub fn layout_in(
     content: &Markup,
 ) -> Markup {
     let headers = json!({ TOKEN_HEADER: app.csrf.token() }).to_string();
+    let tab = match kind {
+        Kind::Index { tab, .. } => Some(tab.as_str()),
+        _ => None,
+    };
     html! {
         (DOCTYPE)
-        html lang="en" {
+        html lang="en" data-tab=[tab] {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
@@ -110,7 +116,7 @@ pub fn layout_in(
                 header.topbar {
                     a.home href="/" { "sanic-review" }
                     @for crumb in crumbs { span.crumb { "/ " (crumb) } }
-                    @if let Kind::Index { archived, pending } = kind {
+                    @if let Kind::Index { archived, pending, .. } = kind {
                         (counts(app, archived, pending))
                     } @else {
                         (counts(app, false, None))

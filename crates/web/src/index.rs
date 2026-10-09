@@ -8,8 +8,8 @@ use std::{
 use axum::{
     Form,
     extract::{RawQuery, State},
-    http::HeaderName,
-    response::{IntoResponse, Redirect},
+    http::{HeaderMap, header},
+    response::{IntoResponse, Redirect, Response},
 };
 use color_eyre::eyre::Result;
 use maud::{Markup, html};
@@ -28,7 +28,7 @@ use tracing::info;
 use crate::{
     App, Error, Shared,
     cells::{LeadPop, ReviewedBy, plural},
-    filter::{self, Facet, IndexQuery, RowValues, Side, count, hidden_line},
+    filter::{self, Facet, IndexQuery, RowValues, Side, Tab, count, hidden_line},
     page::{self, Kind, countdown, csrf_field, drafts, keycap, pr_ref},
     pr_href,
 };
@@ -180,16 +180,68 @@ pub fn why(pr: &OwedReview, overview: &Overview) -> Option<Why> {
     )
 }
 
-/// Tells htmx the address bar's URL once the sidebar's request swaps in.
-const HX_REPLACE_URL: HeaderName = HeaderName::from_static("hx-replace-url");
+/// The browser's last tab, which `/` goes to. Not `HttpOnly`: `app.js`
+/// writes it on a switch, with the same attributes so there's only one.
+const TAB_COOKIE: &str = "sanic_review_tab";
 
-pub async fn index(
+fn tab_cookie(tab: Tab) -> String {
+    format!(
+        "{TAB_COOKIE}={}; Path=/; SameSite=Lax; Max-Age=31536000",
+        tab.as_str()
+    )
+}
+
+/// The first `sanic_review_tab` cookie that names a tab.
+fn last_tab(headers: &HeaderMap) -> Option<Tab> {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
+        .filter_map(|pair| pair.trim().split_once('='))
+        .filter(|(name, _)| *name == TAB_COOKIE)
+        .find_map(|(_, value)| Tab::of_str(value))
+}
+
+/// `/` goes to the browser's last tab, keeping the query.
+pub async fn root(RawQuery(raw): RawQuery, headers: HeaderMap) -> Result<impl IntoResponse, Error> {
+    let query = IndexQuery::parse(raw.as_deref()).map_err(Error::BadRequest)?;
+    let tab = last_tab(&headers).unwrap_or(Tab::Reviews);
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Redirect::to(&query.in_tab(tab).href()),
+    ))
+}
+
+pub async fn reviews(
     State(app): State<Shared>,
     RawQuery(raw): RawQuery,
-) -> Result<impl IntoResponse, Error> {
-    let query = IndexQuery::parse(raw.as_deref()).map_err(Error::BadRequest)?;
-    let mut overview = Overview::load(&app)?;
-    overview.load_facts(&app)?;
+    headers: HeaderMap,
+) -> Result<Response, Error> {
+    index(&app, raw.as_deref(), &headers, Tab::Reviews)
+}
+
+pub async fn prs(
+    State(app): State<Shared>,
+    RawQuery(raw): RawQuery,
+    headers: HeaderMap,
+) -> Result<Response, Error> {
+    index(&app, raw.as_deref(), &headers, Tab::Prs)
+}
+
+/// Both lists, showing `tab`'s. The script keeps the address bar, so a
+/// refresh says nothing of it.
+fn index(
+    app: &Shared,
+    raw: Option<&str>,
+    headers: &HeaderMap,
+    tab: Tab,
+) -> Result<Response, Error> {
+    let query = IndexQuery::parse(raw)
+        .map_err(Error::BadRequest)?
+        .in_tab(tab);
+    let mut overview = Overview::load(app)?;
+    overview.load_facts(app)?;
     let listed = Listed::of(&overview, query.archived);
     let values: Vec<RowValues> = listed
         .owed
@@ -207,18 +259,23 @@ pub async fn index(
     });
     let content = html! {
         (filter::sidebar(&query, &values, &app.me))
-        (lists(&app, &overview, &listed, &query))
+        (lists(app, &overview, &listed, &query))
     };
     let page = page::layout(
-        &app,
+        app,
         Kind::Index {
+            tab,
             archived: query.archived,
             pending,
         },
         "Dashboard",
         &content,
     );
-    Ok(([(HX_REPLACE_URL, query.href())], page))
+    // Only a page load: a refresh sent before a switch mustn't undo it.
+    if headers.contains_key("hx-request") {
+        return Ok(page.into_response());
+    }
+    Ok(([(header::SET_COOKIE, tab_cookie(tab))], page).into_response())
 }
 
 /// The rows the lists show before the filter, in the store's order, each
@@ -527,8 +584,9 @@ fn lists(app: &App, overview: &Overview, listed: &Listed, query: &IndexQuery) ->
     }
 }
 
-/// The lists' tabs, shown only with the script, which picks one. Each
-/// counts its list, and those in it that need you, as its headings do.
+/// The lists' tabs, each a link to its own path, which the script follows
+/// without a page load. Each counts its list, and those in it that need
+/// you, as its headings do.
 fn tabs(listed: &Listed, query: &IndexQuery) -> Markup {
     let owed = shown(&listed.owed, query);
     let mine = shown(&listed.mine, query);
@@ -541,17 +599,26 @@ fn tabs(listed: &Listed, query: &IndexQuery) -> Markup {
         .filter(|l| l.group == Some(MyGroup::NeedsYou))
         .count();
     html! {
-        div.tabs {
-            (tab("owed", "Reviews you owe", owed.len(), listed.owed.len(), owed_need))
-            (tab("mine", "Your PRs", mine.len(), listed.mine.len(), mine_need))
+        nav.tabs aria-label="Lists" {
+            (tab(query, Tab::Reviews, "owed", "Reviews you owe", &count(owed.len(), listed.owed.len()), owed_need))
+            (tab(query, Tab::Prs, "mine", "Your PRs", &count(mine.len(), listed.mine.len()), mine_need))
         }
     }
 }
 
-fn tab(list: &str, title: &str, shown: usize, listed: usize, need: usize) -> Markup {
+fn tab(
+    query: &IndexQuery,
+    tab: Tab,
+    list: &str,
+    title: &str,
+    counted: &str,
+    need: usize,
+) -> Markup {
+    let current = (query.tab == Some(tab)).then_some("page");
     html! {
-        button.tab type="button" data-tab=(list) aria-controls=(list) aria-pressed="false" {
-            (title) " " span.dim { (count(shown, listed)) }
+        a.tab href=(query.in_tab(tab).href()) data-tab=(tab.as_str()) aria-controls=(list)
+            aria-current=[current] {
+            (title) " " span.dim { (counted) }
             @if need > 0 {
                 " " span.chip.u-act { (need) (if need == 1 { " needs you" } else { " need you" }) }
             }
@@ -592,6 +659,8 @@ fn owed_list(
     listed: &[Listing<OwedReview, OwedGroup>],
     query: &IndexQuery,
 ) -> Markup {
+    // Its links go back to its own tab, whichever another window picked.
+    let query = &query.in_tab(Tab::Reviews);
     let shown = shown(listed, query);
     // The group's rows the filter leaves, and how many it has without it.
     let group = |group| -> (Vec<&OwedReview>, usize) {
@@ -653,6 +722,7 @@ fn my_list(
     listed: &[Listing<MyPr, Option<MyGroup>>],
     query: &IndexQuery,
 ) -> Markup {
+    let query = &query.in_tab(Tab::Prs);
     let shown = shown(listed, query);
     let group = |group: Option<MyGroup>| -> (Vec<&MyPr>, usize) {
         let prs = shown

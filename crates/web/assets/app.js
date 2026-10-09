@@ -294,7 +294,7 @@
         const n = lists().length;
         if (page !== "index" || n === 0) return;
         if (popover(document.activeElement)) document.activeElement.blur();
-        setTab((focus + (e.shiftKey ? n - 1 : 1)) % n);
+        setTab((focus + (e.shiftKey ? n - 1 : 1)) % n, "replace");
         break;
       }
       case "j":
@@ -398,7 +398,7 @@
       case "X": {
         const panes = document.getElementById("panes");
         if (!panes) return;
-        go(panes.dataset.archivedHref);
+        go(tabPath() + queryOf(panes.dataset.archivedHref));
         break;
       }
       case "/": {
@@ -857,6 +857,68 @@
     retally();
   });
 
+  // In lists() order. The server can't know a window's tab after a switch,
+  // so this script keeps <html data-tab> and the address bar's path.
+  const TABS = ["reviews", "prs"];
+  function tabPath() {
+    return "/" + TABS[focus];
+  }
+  function queryOf(href) {
+    const at = href.indexOf("?");
+    return at < 0 ? "" : href.slice(at);
+  }
+  // The lists' query, which a refresh or the filter may have changed, on
+  // this window's path: a refresh asks for the path the page loaded with.
+  function syncUrl() {
+    const panes = document.getElementById("panes");
+    if (!panes) return;
+    const url = tabPath() + queryOf(panes.getAttribute("hx-get") || "");
+    if (url !== window.location.pathname + window.location.search) {
+      history.replaceState(history.state, "", url);
+    }
+  }
+  function markTabs() {
+    document.querySelectorAll(".tab[data-tab]").forEach(function (tab) {
+      if (tab.dataset.tab === TABS[focus]) tab.setAttribute("aria-current", "page");
+      else tab.removeAttribute("aria-current");
+    });
+  }
+  // `how` is "push", "replace", or null when Back or Forward already moved.
+  function setTab(i, how) {
+    if (!TABS[i]) return;
+    focus = i;
+    document.documentElement.dataset.tab = TABS[i];
+    markTabs();
+    // As the server writes it: Path=/ and not HttpOnly, so there's one.
+    document.cookie = "sanic_review_tab=" + TABS[i] + "; Path=/; SameSite=Lax; Max-Age=31536000";
+    const url = tabPath() + window.location.search;
+    // Our own state, never htmx's, so its history restore leaves these be.
+    if (how === "push") history.pushState({ tab: TABS[i] }, "", url);
+    else if (how === "replace") history.replaceState({ tab: TABS[i] }, "", url);
+    draw(true);
+  }
+  if (page === "index") {
+    focus = Math.max(0, TABS.indexOf(document.documentElement.dataset.tab));
+    // The tabs come back with each refresh, marked for the path it asked.
+    document.body.addEventListener("htmx:afterSwap", markTabs);
+    document.body.addEventListener("htmx:afterSettle", syncUrl);
+    document.addEventListener("click", function (e) {
+      const tab = e.target.closest(".tab[data-tab]");
+      if (!tab || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      if (tab.dataset.tab !== TABS[focus]) setTab(TABS.indexOf(tab.dataset.tab), "push");
+      // A click leaves focus on the page, so Enter opens the selected row.
+      if (e.detail !== 0) tab.blur();
+    });
+    window.addEventListener("popstate", function () {
+      const at = TABS.indexOf(window.location.pathname.slice(1));
+      if (at < 0) return;
+      setTab(at, null);
+      // The entry's filter may be older than the lists shown.
+      syncUrl();
+    });
+  }
+
   // The PR page's view of its drafts, remembered for this browser: a
   // page asked for without one shows the one you last picked, and the
   // URL says which, so a link to it shows the same.
@@ -874,46 +936,6 @@
     } catch (err) {
       // Private windows may refuse; it's only a convenience.
     }
-  }
-  // The index's tab, the list you move in, remembered the same way; the
-  // page's style shows only the list named on <html>, which refreshes keep.
-  const LIST_KEY = "sanic-review.list";
-  function markTabs() {
-    const shown = document.documentElement.dataset.tab;
-    document.querySelectorAll(".tab[data-tab]").forEach(function (tab) {
-      tab.setAttribute("aria-pressed", String(tab.dataset.tab === shown));
-    });
-  }
-  function showTab(i) {
-    const list = lists()[i];
-    if (!list) return;
-    focus = i;
-    document.documentElement.dataset.tab = list.id;
-    markTabs();
-  }
-  function setTab(i) {
-    showTab(i);
-    remember(LIST_KEY, document.documentElement.dataset.tab);
-    draw(true);
-  }
-  if (page === "index") {
-    const saved = remembered(LIST_KEY);
-    const at = lists().findIndex(function (list) {
-      return list.id === saved;
-    });
-    showTab(Math.max(at, 0));
-    document.body.addEventListener("htmx:afterSwap", markTabs);
-    document.addEventListener("click", function (e) {
-      const tab = e.target.closest(".tab[data-tab]");
-      if (!tab) return;
-      const at = lists().findIndex(function (list) {
-        return list.id === tab.dataset.tab;
-      });
-      if (at < 0) return;
-      setTab(at);
-      // A click leaves focus on the page, so Enter opens the selected row.
-      if (e.detail !== 0) tab.blur();
-    });
   }
   // The files view's layout, remembered the same way.
   const LAYOUT_KEY = "sanic-review.layout";

@@ -205,7 +205,7 @@ mod tests {
         let url = bound.url();
         tokio::spawn(bound.serve());
 
-        let index = get(&url, "/").await;
+        let index = get(&url, "/reviews").await;
         assert!(index.starts_with("HTTP/1.1 200"), "{index}");
         for title in [
             "Teach the frobnicator to count past three",

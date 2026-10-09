@@ -259,7 +259,9 @@ impl Dashboard {
 
     fn router(&self) -> Router {
         Router::new()
-            .route("/", get(index::index))
+            .route("/", get(index::root))
+            .route("/reviews", get(index::reviews))
+            .route("/prs", get(index::prs))
             .route("/pr/{owner}/{name}/{number}", get(pr::page))
             .route(
                 "/pr/{owner}/{name}/{number}/review-now",
