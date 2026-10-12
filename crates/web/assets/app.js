@@ -929,21 +929,40 @@
   // The index's filter, its URL's query, remembered for this tab: links
   // to the bare index go back to it filtered as you left it, while a bare
   // `/` you type or load stays unfiltered. An empty filter forgets it.
+  // A tab opened from another, as a PR opened in a new tab is, starts
+  // with no session storage, so it takes the latest filter any tab kept;
+  // a tab that left its index unfiltered keeps "" so it doesn't.
   const FILTER_KEY = "sanic-review.filter";
   function lastFilter() {
+    let own;
     try {
-      return window.sessionStorage.getItem(FILTER_KEY) || "";
+      own = window.sessionStorage.getItem(FILTER_KEY);
     } catch (err) {
       return "";
     }
-  }
-  function keepFilter(query) {
+    if (own !== null) return own;
+    const latest = remembered(FILTER_KEY) || "";
     try {
-      if (query) window.sessionStorage.setItem(FILTER_KEY, query);
-      else window.sessionStorage.removeItem(FILTER_KEY);
+      window.sessionStorage.setItem(FILTER_KEY, latest);
+    } catch (err) {
+      // Not kept; the next look takes the latest again.
+    }
+    return latest;
+  }
+  // The panes' every reread replaces the URL too, so only a filter this
+  // tab changed becomes the latest: an index left open elsewhere doesn't
+  // keep putting its own back. A new tab's unfiltered index changed
+  // nothing, so another tab's filter stays the latest.
+  function keepFilter(query) {
+    let changed = false;
+    try {
+      const own = window.sessionStorage.getItem(FILTER_KEY);
+      changed = own === null ? query !== "" : own !== query;
+      window.sessionStorage.setItem(FILTER_KEY, query);
     } catch (err) {
       // Storage may be off; the links stay bare.
     }
+    if (changed) remember(FILTER_KEY, query);
     homeLinks(document);
   }
   function indexHref() {

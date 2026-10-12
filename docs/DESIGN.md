@@ -896,8 +896,10 @@ fonttools (run through `uv`, which only this task needs) to
     (`sessionStorage`), so the top bar's home link, `q`, and the other
     links to the index go back to it filtered as you left it. A bare `/`
     you type or load is unfiltered, and the index unfiltered forgets
-    what was kept. Without the script, or with storage off, those links
-    go to a bare `/`.
+    what was kept. A new tab, such as a PR opened in one from the index,
+    starts with no session storage, so it takes the query last set in
+    any tab (`localStorage`). Without the script, or with storage off,
+    those links go to a bare `/`.
   - A filtered list's heading and its group headers say `2 of 8`, and a
     group the filter empties is left out. Under the heading, `N hidden by
     filter · clear` says what the filter hides. The recency window's line
