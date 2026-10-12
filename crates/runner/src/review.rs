@@ -15,6 +15,7 @@ use std::{
 use color_eyre::eyre::{Result, WrapErr, bail, eyre};
 use sanic_core::{
     config::{Profile, RunnerSettings},
+    pr::PrKey,
     run::{
         BaselineDraft, Basis, Carried, Dismissal, DraftComment, DraftOutput, DraftRevision,
         PrContext, QueuedRun, Resume, ReviewOutput, ReviewResult, RevisedOutput, Side, Verdict,
@@ -26,7 +27,7 @@ use crate::{
     chat,
     claude::{Claude, Ended, Invocation, Outcome},
     diff::{DiffIndex, LineMap},
-    mirror::{Mirrors, Step, Worktree},
+    mirror::{ClaudeTree, Mirrors, Step, Worktree},
     prompt,
 };
 
@@ -147,6 +148,20 @@ impl ReviewRunner {
         };
         worktree.remove().await;
         result.transpose()
+    }
+
+    /// What `key`'s `.claude` check of `head_sha` on `base_sha` reads; see
+    /// [`Mirrors::claude_tree`].
+    pub async fn claude_tree(
+        &self,
+        git_url: &str,
+        key: &PrKey,
+        head_sha: &str,
+        base_sha: &str,
+    ) -> Result<ClaudeTree> {
+        self.mirrors
+            .claude_tree(git_url, key, head_sha, base_sha)
+            .await
     }
 
     /// Removes `run`'s worktree when [`ReviewRunner::review`] didn't get to,

@@ -399,7 +399,8 @@ async fn manual_reviews_hold_runs_until_turned_off() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sanic_review_review_starts_a_held_review() {
     let w = world().await;
-    w.serve_with_until(&["--manual-reviews"], "review held")
+    // A head still being checked for `.claude` changes isn't started.
+    w.serve_with_until(&["--manual-reviews"], "checked for `.claude` changes")
         .await;
     let output = Command::new(env!("CARGO_BIN_EXE_sanic-review"))
         .args(["review", "https://github.com/org/repo/pull/7", "--data-dir"])

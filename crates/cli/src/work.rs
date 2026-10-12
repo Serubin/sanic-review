@@ -18,6 +18,7 @@ use std::{
 use color_eyre::eyre::{Result, eyre};
 use sanic_core::{
     config::{Config, RunnerSettings},
+    hold::findings,
     manual::ManualReviews,
     pr::PrKey,
     run::{DraftRevision, QueuedRun, Resume, ReviewResult, ReviewTrigger, Revision},
@@ -245,6 +246,40 @@ impl Worker {
         }
     }
 
+    /// Checks `key`'s `head` on `base` for `.claude` changes, in the
+    /// mirror: every path the PR's commits touch, and where the `.claude`
+    /// symlinks in its tree lead. Records what reaches `.claude`, or why
+    /// checking failed.
+    pub async fn check_head(&self, key: &PrKey, base: &str, head: &str) {
+        let git_url = self
+            .settings
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .git_url
+            .clone();
+        let found = self
+            .runner
+            .claude_tree(&git_url, key, head, base)
+            .await
+            .map(|tree| findings(&tree.touched, &tree.links))
+            .map_err(|err| {
+                warn!(url = %key.url(), "checking for `.claude` changes failed: {err:?}");
+                format!("{err:#}")
+            });
+        let recorded =
+            self.store()
+                .record_check(key, base, head, found.as_deref().map_err(String::as_str));
+        match (recorded, &found) {
+            (Err(err), _) => {
+                warn!(url = %key.url(), "recording the `.claude` check failed: {err:?}");
+            }
+            (Ok(()), Ok(found)) => {
+                info!(head, found = found.len(), "checked for `.claude` changes");
+            }
+            (Ok(()), Err(_)) => {}
+        }
+    }
+
     pub fn run_settings(&self, profile: &str) -> Result<RunSettings> {
         let settings = self.settings.read().unwrap_or_else(PoisonError::into_inner);
         let agent = settings
@@ -274,8 +309,8 @@ impl Worker {
                 noticed: |job: &Job| {
                     // A held newer head won't run, so stopping the running
                     // review would spend its work for nothing.
-                    if job.automatic && self.holds_reviews(&job.run.request.profile) {
-                        debug!(run = job.run.id, "held: manual reviews hold its profile");
+                    if job.automatic && self.holds_run(&job.run) {
+                        debug!(run = job.run.id, "held: manual reviews or a `.claude` hold");
                     } else {
                         self.stop_older_review(&job.run);
                     }
@@ -320,13 +355,14 @@ impl Worker {
     }
 
     /// Claims a job that skips the queue. `false` if it was superseded or
-    /// cancelled while it waited for a permit, or if manual reviews started
-    /// holding its profile, so it never starts.
+    /// cancelled while it waited for a permit, or if, being automatic, it's
+    /// held by now (see [`Self::holds_run`]), so it never starts.
     fn claim_started(&self, job: &Job) -> bool {
-        if job.automatic && self.holds_reviews(&job.run.request.profile) {
+        if job.automatic && self.holds_run(&job.run) {
             debug!(
                 run = job.run.id,
-                "held: manual reviews were turned on before it started"
+                "held: manual reviews were turned on, or its PR touched `.claude`, before it \
+                 started"
             );
             return false;
         }
@@ -339,6 +375,28 @@ impl Worker {
             Err(err) => {
                 warn!(run = job.run.id, "claiming the run failed: {err:?}");
                 false
+            }
+        }
+    }
+
+    /// Whether an automatic `run` is held: by manual reviews, or by a
+    /// `.claude` hold.
+    fn holds_run(&self, run: &QueuedRun) -> bool {
+        if self.holds_reviews(&run.request.profile) {
+            return true;
+        }
+        match self.store().claude_holds_run(
+            &run.request.key,
+            &run.request.base_sha,
+            &run.request.head_sha,
+        ) {
+            Ok(why) => why.is_some(),
+            Err(err) => {
+                warn!(
+                    url = %run.request.key.url(),
+                    "checking for a `.claude` hold failed, so holding the run: {err:?}"
+                );
+                true
             }
         }
     }
@@ -1029,6 +1087,14 @@ mod tests {
             in_progress: None,
         };
         store.record(&snapshot, "me", "p", &[]).unwrap();
+        store
+            .record_check(
+                &snapshot.key,
+                &snapshot.base_sha,
+                &snapshot.head_sha,
+                Ok(&[]),
+            )
+            .unwrap();
         let run = store.queue_review(&queued(0).request).unwrap().unwrap();
         (store, run)
     }
@@ -1238,6 +1304,14 @@ mod tests {
         };
         snapshot.head_sha = first.clone();
         store.record(&snapshot, "me", "p", &[]).unwrap();
+        store
+            .record_check(
+                &snapshot.key,
+                &snapshot.base_sha,
+                &snapshot.head_sha,
+                Ok(&[]),
+            )
+            .unwrap();
         let store = Arc::new(Mutex::new(store));
         let run = store
             .lock()
@@ -1343,6 +1417,14 @@ mod tests {
             in_progress: None,
         };
         store.record(&snapshot, "me", "p", &[]).unwrap();
+        store
+            .record_check(
+                &snapshot.key,
+                &snapshot.base_sha,
+                &snapshot.head_sha,
+                Ok(&[]),
+            )
+            .unwrap();
         let source = store.queue_review(&source.request).unwrap().unwrap();
         store.claim_run(source.id).unwrap();
         let original = ReviewResult {
@@ -1509,6 +1591,14 @@ mod tests {
             in_progress: None,
         };
         store.record(&snapshot, "me", "p", &[]).unwrap();
+        store
+            .record_check(
+                &snapshot.key,
+                &snapshot.base_sha,
+                &snapshot.head_sha,
+                Ok(&[]),
+            )
+            .unwrap();
         let mut earlier = request.clone();
         earlier.head_sha.clone_from(&first);
         let source = store.queue_review(&earlier).unwrap().unwrap();
@@ -1757,6 +1847,7 @@ mod tests {
                 }],
             }),
         };
+        // Its runs start by hand, so it needs no `.claude` check.
         store.record(&snapshot, "me", "p", &[]).unwrap();
         let store = Arc::new(Mutex::new(store));
         let request = |head: &str| sanic_core::run::ReviewRequest {

@@ -224,7 +224,10 @@ pub async fn schedule(
                     let queued = store.queue_review(&request);
                     match queued {
                         Ok(Some(run)) => {
-                            if manual.borrow().holds(&run.request.profile) {
+                            // The hold logs a held one when it arrives.
+                            let held = crate::serve::held_why(&manual.borrow(), &store, &run)
+                                .is_some();
+                            if held {
                                 debug!(url = %request.key.url(), run = run.id, "review queued");
                             } else {
                                 info!(url = %request.key.url(), run = run.id, "review queued");

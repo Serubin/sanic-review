@@ -14,7 +14,7 @@ use serde::Deserialize;
 use tracing::info;
 
 use crate::{
-    App, Error, Shared,
+    App, Error, Shared, hold,
     page::{self, Card, Kind, Tone, csrf_field, keycap, pr_ref},
     pr::{crumb, short},
     pr_href,
@@ -83,7 +83,12 @@ pub async fn confirm(
         None => String::new(),
     };
     let action = format!("{}/runs/{}/regenerate", pr_href(&pr.key), run.id);
+    let hold = app
+        .store()
+        .claude_hold(&pr.key)
+        .map_err(Error::pr(&pr.key))?;
     let explain = html! {
+        @if let Some(hold) = &hold { (hold::warning(&pr.key, hold)) }
         ul.explain {
             li {
                 "It resumes run " (number) "'s agent session, not interactively, with your "

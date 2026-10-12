@@ -17,6 +17,7 @@ use color_eyre::{
 };
 use sanic_core::{
     config::{Config, default_config_path, default_data_dir},
+    hold::{CLAUDE_HOLD_WHY, ClaudeHold},
     pr::PrKey,
 };
 use sanic_runner::{
@@ -129,6 +130,9 @@ impl Chat {
         let config = Config::load(&paths.config, &VcsResolver)?;
         let session = find(paths, target)?;
         let run = &session.run;
+        if let Some(warning) = claude_warning(paths, &run.request.key)? {
+            eprintln!("{warning}");
+        }
         let runner = ReviewRunner::new(&paths.data_dir);
         let dir = runner.worktree_path(run);
         if dir.exists() {
@@ -219,6 +223,21 @@ fn find(paths: &Paths, target: &Target) -> Result<SessionRun> {
             .session_run(*id)?
             .ok_or_else(|| eyre!("run {id} has no session to chat with")),
     }
+}
+
+/// What to say before a chat of `key`, if it has a `.claude` hold.
+fn claude_warning(paths: &Paths, key: &PrKey) -> Result<Option<String>> {
+    let store = Store::open(&paths.data_dir.join("state.db"))?;
+    Ok(store
+        .claude_hold(key)?
+        .filter(ClaudeHold::warns)
+        .map(|hold| {
+            format!(
+                "warning: {} is held for .claude ({}). {CLAUDE_HOLD_WHY}",
+                key.url(),
+                hold.paths().join("; ")
+            )
+        }))
 }
 
 /// Removes the worktree a printed chat command left. Returns its path.

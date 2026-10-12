@@ -6,6 +6,7 @@ use std::time::SystemTime;
 use maud::{Markup, html};
 use sanic_core::{
     clock::{ago, parse_rfc3339},
+    hold::ClaudeHold,
     pr::{PrKey, is_login},
     reviewers::{Reviewer, Stance},
     skip::Skip,
@@ -67,6 +68,9 @@ pub struct LeadPop<'a> {
     /// Manual reviews hold its latest run, queued, by the profile it was
     /// queued under.
     pub manual_reviews: bool,
+    /// Its PR's `.claude` hold, which holds that run whatever manual
+    /// reviews say: for good, or while its head is checked.
+    pub claude_hold: Option<&'a ClaudeHold>,
     pub now: SystemTime,
 }
 
@@ -86,7 +90,13 @@ impl LeadPop<'_> {
                     None => "none yet",
                     Some("queued") => {
                         "queued" (time(times.map(|t| &t.queued_at)))
-                        @if self.manual_reviews {
+                        @if self.claude_hold.is_some_and(|h| !h.findings.is_empty()) {
+                            "; held until you start it (r), since the PR changes .claude"
+                        } @else if self.claude_hold.is_some_and(ClaudeHold::warns) {
+                            "; held until you start it (r), since checking it for .claude changes failed"
+                        } @else if self.claude_hold.is_some() {
+                            "; waits until its head is checked for .claude changes"
+                        } @else if self.manual_reviews {
                             "; manual reviews hold it until you start it (r)"
                         } @else {
                             "; it starts when a slot is free"

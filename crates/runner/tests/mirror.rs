@@ -7,7 +7,7 @@ mod common;
 
 use std::sync::{Arc, Mutex};
 
-use common::{git, key, remote};
+use common::{commit, git, key, remote};
 use sanic_runner::mirror::{Interdiff, Mirrors, Step, lock_file};
 use tempfile::TempDir;
 
@@ -437,4 +437,107 @@ async fn an_interdiff_after_merging_the_base_in_is_a_range_diff() {
         .await
         .unwrap();
     assert_eq!(map.map(2), Some(2));
+}
+
+#[tokio::test]
+async fn claude_links_lead_where_they_point_in_the_head() {
+    let root = TempDir::new().unwrap();
+    let github_repo = root.path().join("org/repo.git");
+    std::fs::create_dir_all(&github_repo).unwrap();
+    git(&github_repo, &["init", "-q", "--bare"]);
+    let work = root.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    git(&work, &["init", "-q", "-b", "main"]);
+    let link = |at: &str, to: &str| {
+        let at = work.join(at);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(to, at).unwrap();
+    };
+    std::fs::create_dir_all(work.join("tools/agent")).unwrap();
+    std::fs::write(work.join("tools/agent/SKILL.md"), "x").unwrap();
+    // The directory itself, a link at depth, a link to a link, one out of
+    // the repository, and one that isn't under a `.claude`.
+    link(".claude", "tools/agent");
+    link("pkg/.claude/skills/s", "../../../shared");
+    link("shared", "real/skills");
+    link("x/.claude/abs", "/etc");
+    link("x/.claude/up", "../../..");
+    link("docs", "tools");
+    git(&work, &["add", "."]);
+    git(&work, &["commit", "-q", "-m", "links"]);
+    let head = git(&work, &["rev-parse", "HEAD"]);
+    let github_arg = github_repo.to_string_lossy();
+    git(
+        &work,
+        &["push", "-q", &github_arg, "main", "main:refs/pull/7/head"],
+    );
+
+    let data = TempDir::new().unwrap();
+    let mirrors = Mirrors::new(data.path().join("mirrors"));
+    let url = root.path().to_string_lossy();
+    let tree = mirrors
+        .claude_tree(&url, &key(), &head, &head)
+        .await
+        .unwrap();
+    let found: Vec<(&str, &str)> = tree
+        .links
+        .iter()
+        .map(|l| (l.link.as_str(), l.target.as_str()))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            (".claude", "tools/agent"),
+            ("pkg/.claude/skills/s", "real/skills")
+        ]
+    );
+}
+
+#[tokio::test]
+async fn every_path_the_prs_commits_touch_is_found_however_they_end() {
+    let root = TempDir::new().unwrap();
+    let github_repo = root.path().join("org/repo.git");
+    std::fs::create_dir_all(&github_repo).unwrap();
+    git(&github_repo, &["init", "-q", "--bare"]);
+    let work = root.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    git(&work, &["init", "-q", "-b", "main"]);
+    commit(&work, "lib.rs", "one\n");
+    git(&work, &["checkout", "-q", "-b", "pr"]);
+    // Added, then reverted: the net diff is empty, but it was there.
+    // Forced, past any `.claude` a global ignore file leaves out.
+    let add = |path: &str, contents: &str| {
+        let file = work.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, contents).unwrap();
+        git(&work, &["add", "-f", path]);
+        git(&work, &["commit", "-q", "-m", path]);
+        git(&work, &["rev-parse", "HEAD"])
+    };
+    add(".claude/agents/a.md", "run things");
+    git(&work, &["rm", "-q", "-r", ".claude"]);
+    git(&work, &["commit", "-q", "-m", "revert"]);
+    commit(&work, "lib.rs", "two\n");
+    // The base moves on, touching its own `.claude`, and is merged in.
+    git(&work, &["checkout", "-q", "main"]);
+    let base = add("other/.claude/z.md", "the base's own");
+    git(&work, &["checkout", "-q", "pr"]);
+    git(&work, &["merge", "-q", "--no-edit", "main"]);
+    let head = git(&work, &["rev-parse", "HEAD"]);
+    let github_arg = github_repo.to_string_lossy();
+    git(
+        &work,
+        &["push", "-q", &github_arg, "main", "pr:refs/pull/7/head"],
+    );
+
+    let data = TempDir::new().unwrap();
+    let mirrors = Mirrors::new(data.path().join("mirrors"));
+    let url = root.path().to_string_lossy();
+    let mut touched = mirrors
+        .claude_tree(&url, &key(), &head, &base)
+        .await
+        .unwrap()
+        .touched;
+    touched.sort();
+    assert_eq!(touched, [".claude/agents/a.md", "lib.rs"]);
 }

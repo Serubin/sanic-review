@@ -2,6 +2,7 @@
 
 pub mod clock;
 pub mod config;
+pub mod hold;
 pub mod manual;
 pub mod pr;
 pub mod repo;

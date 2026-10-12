@@ -7,7 +7,7 @@ use sanic_core::pr::PrKey;
 use sanic_runner::{chat::quote, review::ReviewRunner};
 use sanic_store::SessionRun;
 
-use crate::App;
+use crate::{App, hold};
 
 /// `sanic-review chat <args>` against `serve`'s own config and data, run
 /// by the binary `serve` is, so the pasted command agrees with it.
@@ -63,12 +63,18 @@ pub fn section(app: &App, key: &PrKey, shown: Option<i64>) -> Option<Markup> {
     };
     let id = session.run.id;
     let claude = claude_line(app, &session);
+    // A chat loads the PR's own skills and agents too.
+    let hold = app.store().claude_hold(key).unwrap_or_else(|err| {
+        tracing::warn!(url = %key.url(), "reading the PR's `.claude` hold failed: {err:?}");
+        None
+    });
     Some(html! {
         section.chat #chat {
             h2 {
                 "Chat with the reviewer "
                 span.dim { "run " (id) @if claude.is_ok() { " · paste into a terminal" } }
             }
+            @if let Some(hold) = &hold { (hold::warning(key, hold)) }
             @match &claude {
                 Err(why) => { p.error { "Can't chat with run " (id) ": " (why) } }
                 Ok(line) => {

@@ -13,7 +13,7 @@ use sanic_core::{
     },
 };
 
-use crate::{NOW, Posted, Store, posted::same_body};
+use crate::{NOW, Posted, Store, hold::claude_held, posted::same_body};
 
 const REVIEW: &str = RunKind::Review.as_str();
 
@@ -618,15 +618,18 @@ impl Store {
     /// Marks the first queued review running and returns it; `None` when
     /// nothing is queued. A run whose profile `held` names is skipped
     /// rather than taken, so manual reviews holding one profile don't stop
-    /// the rest of the queue. The claim is conditional, so a run another
-    /// claimer took first is passed over.
+    /// the rest of the queue, as is one of a PR with a `.claude` hold. The
+    /// claim is conditional, so a run another claimer took first is passed
+    /// over.
     pub fn claim_next(&self, held: impl Fn(&str) -> bool) -> Result<Option<QueuedRun>> {
         let queued: Vec<(i64, String)> = {
-            let mut stmt = self.conn.prepare_cached(
+            let mut stmt = self.conn.prepare_cached(&format!(
                 "SELECT id, profile FROM runs
-                 WHERE status = 'queued' AND kind = ?1 AND queue_pos IS NOT NULL
-                 ORDER BY queue_pos, id",
-            )?;
+                     WHERE status = 'queued' AND kind = ?1 AND queue_pos IS NOT NULL
+                           AND NOT {held}
+                     ORDER BY queue_pos, id",
+                held = claude_held("runs.repo", "runs.number", "runs.base_sha", "runs.head_sha")
+            ))?;
             stmt.query_map([REVIEW], |row| Ok((row.get(0)?, row.get(1)?)))?
                 .collect::<rusqlite::Result<_>>()?
         };
@@ -1248,12 +1251,15 @@ impl Store {
     }
 
     /// How many [`Store::queued_reviews`] there are of PRs whose profile,
-    /// as each was queued, is `counted`.
+    /// as each was queued, is `counted`, leaving out PRs with a `.claude`
+    /// hold: what turning manual reviews off for those profiles starts.
     pub fn queued_review_count(&self, counted: impl Fn(&str) -> bool) -> Result<u32> {
-        let mut stmt = self.conn.prepare_cached(
+        let mut stmt = self.conn.prepare_cached(&format!(
             "SELECT profile, count(*) FROM runs WHERE status = 'queued' AND kind = ?1
+                 AND NOT {held}
              GROUP BY profile",
-        )?;
+            held = claude_held("runs.repo", "runs.number", "runs.base_sha", "runs.head_sha")
+        ))?;
         let rows = stmt
             .query_map([REVIEW], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
@@ -2156,6 +2162,7 @@ mod tests {
     fn store() -> Store {
         let mut store = Store::open_in_memory().unwrap();
         store.record(&snapshot(), "me", "default", &[]).unwrap();
+        store.check_all_heads();
         store
     }
 
@@ -2181,6 +2188,7 @@ mod tests {
         snap.url = format!("https://github.com/org/repo/pull/{number}");
         snap.threads.clear();
         store.record(&snap, "me", "default", &[]).unwrap();
+        store.check_all_heads();
         snap.key
     }
 
@@ -4032,6 +4040,29 @@ mod tests {
         assert!(store.claim_next(|p| p == "default").unwrap().is_none());
         // Once it isn't held, it's taken, and it kept its place.
         assert_eq!(store.claim_next(|_| false).unwrap().unwrap().id, held.id);
+    }
+
+    #[test]
+    fn a_claude_hold_is_skipped_rather_than_blocking_the_queue() {
+        let mut store = store();
+        let held = queue_for(&mut store, 11);
+        let found = [sanic_core::hold::Finding::Path(
+            "sub/.claude/agents/a.md".into(),
+        )];
+        store
+            .record_check(&held.request.key, "b1", "h1", Ok(&found))
+            .unwrap();
+        let next = queue_for(&mut store, 12);
+
+        // 11 is first in line, but its PR is held, whatever `held` says.
+        let taken = store.claim_next(|_| false).unwrap().unwrap();
+        assert_eq!(taken.id, next.id);
+        assert_eq!(status(&store, held.id), "queued");
+        assert!(store.claim_next(|_| false).unwrap().is_none());
+        // Turning manual reviews off wouldn't start it either.
+        assert_eq!(store.queued_review_count(|_| true).unwrap(), 0);
+        // Started by hand, it runs.
+        assert!(store.claim_run(held.id).unwrap());
     }
 
     #[test]

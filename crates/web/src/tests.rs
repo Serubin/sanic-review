@@ -13,6 +13,7 @@ use axum::{
     http::{HeaderMap, Request, StatusCode, header},
 };
 use http_body_util::BodyExt;
+use sanic_core::hold::Finding;
 use sanic_core::{
     clock::{Clock, RecencyWindow, WindowChoice},
     config::{CheckoutResolver, Config, Unloadable, Vcs},
@@ -323,6 +324,9 @@ async fn fixture(manual_reviews: bool) -> Fixture {
     let mut store = Store::open_in_memory().unwrap();
     for snap in fixture_prs() {
         store.record(&snap, "me", "default", &[]).unwrap();
+        store
+            .record_check(&snap.key, &snap.base_sha, &snap.head_sha, Ok(&[]))
+            .unwrap();
     }
     let request = |number| ReviewRequest {
         key: key(number),
@@ -1454,6 +1458,53 @@ async fn review_now_asks_first_and_then_asks_serve() {
     assert_eq!(*f.serve.started.lock().unwrap(), [key(8), key(10)]);
 }
 
+#[tokio::test]
+async fn a_claude_hold_is_warned_of_wherever_an_agent_could_start() {
+    let f = fixture(false).await;
+    {
+        let mut store = f.store();
+        for (i, path) in [
+            (0, ".claude/skills/x/SKILL.md"),
+            (1, "sub/.claude/agents/y.md"),
+        ] {
+            let snap = fixture_prs().swap_remove(i);
+            let found = [Finding::Path(path.into())];
+            store
+                .record_check(&snap.key, &snap.base_sha, &snap.head_sha, Ok(&found))
+                .unwrap();
+        }
+    }
+    let warned = |body: &str, path: &str| {
+        body.contains("Held: this PR changes <code>.claude</code>")
+            && body.contains(&format!("<code>{path}</code>"))
+            && body.contains("run shell commands as you")
+    };
+    let index = f.get("/").await.body;
+    assert!(warned(&index, ".claude/skills/x/SKILL.md"), "{index}");
+    assert!(warned(&index, "sub/.claude/agents/y.md"), "{index}");
+    assert_eq!(index.matches("class=\"claudehold\"").count(), 2, "{index}");
+
+    let page = f.get("/pr/org/repo/7").await.body;
+    assert!(warned(&page, ".claude/skills/x/SKILL.md"), "{page}");
+    // The chat section repeats it by its command.
+    let chat = &page[page.find("id=\"chat\"").unwrap()..];
+    assert!(warned(chat, ".claude/skills/x/SKILL.md"), "{chat}");
+    let regenerate = f
+        .get(&format!("/pr/org/repo/7/runs/{}/regenerate", f.run))
+        .await
+        .body;
+    assert!(
+        warned(&regenerate, ".claude/skills/x/SKILL.md"),
+        "{regenerate}"
+    );
+
+    let ask = f.get("/pr/org/repo/8/review-now").await.body;
+    assert!(ask.contains("<h1>Rerun this review?</h1>"), "{ask}");
+    assert!(warned(&ask, "sub/.claude/agents/y.md"), "{ask}");
+    // An unflagged PR's pages say nothing of it.
+    assert!(!f.get("/pr/org/repo/10").await.body.contains("claudehold"));
+}
+
 /// The top bar's pending draft count on the page at `uri`.
 async fn pending_in_top_bar(f: &Fixture, uri: &str) -> String {
     let page = f.get(uri).await.body;
@@ -2303,6 +2354,9 @@ async fn decided_drafts_and_blocked_approvals_are_grouped_by_whose_move_it_is() 
             approved(25, "BLOCKED", "PENDING", "Mine, ci pending"),
         ] {
             store.record(&snap, "me", "default", &[]).unwrap();
+            store
+                .record_check(&snap.key, &snap.base_sha, &snap.head_sha, Ok(&[]))
+                .unwrap();
         }
     }
     reviewed_pr(
@@ -2452,6 +2506,9 @@ async fn rows_say_who_reviewed_with_their_verdicts() {
                 ..snapshot(*number, "dave", &format!("PR {number}"))
             };
             store.record(&snap, "me", "default", &[]).unwrap();
+            store
+                .record_check(&snap.key, &snap.base_sha, &snap.head_sha, Ok(&[]))
+                .unwrap();
         }
     }
     let index = f.get("/").await.body;
@@ -2521,7 +2578,13 @@ async fn rows_say_what_waits_on_the_author_or_the_reviewer() {
     {
         let mut store = f.dashboard.app.store();
         store.record(&owed, "me", "default", &[]).unwrap();
+        store
+            .record_check(&owed.key, &owed.base_sha, &owed.head_sha, Ok(&[]))
+            .unwrap();
         store.record(&mine, "me", "default", &[]).unwrap();
+        store
+            .record_check(&mine.key, &mine.base_sha, &mine.head_sha, Ok(&[]))
+            .unwrap();
     }
     let index = f.get("/").await.body;
     assert!(
@@ -2614,6 +2677,22 @@ async fn the_hidden_count_offers_wider_windows_until_reset() {
     assert!(!index.contains("back to default"));
 }
 
+/// Moves fixture PR `number` to the head `newer`, checked for `.claude`
+/// with nothing found, so a review of it can be queued.
+fn newer_head(f: &Fixture, number: u32) {
+    let mut snap = fixture_prs()
+        .into_iter()
+        .find(|s| s.key == key(number))
+        .unwrap();
+    snap.head_sha = "newer".into();
+    let mut store = f.store();
+    let profile = store.pr_summary(&snap.key).unwrap().unwrap().profile;
+    store.record(&snap, "me", &profile, &[]).unwrap();
+    store
+        .record_check(&snap.key, &snap.base_sha, "newer", Ok(&[]))
+        .unwrap();
+}
+
 #[tokio::test]
 async fn settings_switch_manual_reviews_asking_how_many_held_ones_start() {
     let f = fixture(true).await;
@@ -2628,6 +2707,7 @@ async fn settings_switch_manual_reviews_asking_how_many_held_ones_start() {
     assert!(page.contains(r#"<input type="hidden" name="held" value="0">"#));
 
     // PR 7's latest run goes back to queued, which manual reviews hold.
+    newer_head(&f, 7);
     f.dashboard
         .app
         .store()
@@ -2755,6 +2835,9 @@ async fn held_goes_by_the_profile_the_run_was_queued_under_not_the_prs() {
             .unwrap()
             .unwrap();
         store.record(&eight, "me", now, &[]).unwrap();
+        store
+            .record_check(&eight.key, "base", head, Ok(&[]))
+            .unwrap();
     };
     let row_of_8 = |index: &str| {
         let at = index.find(r#"data-key="org/repo#8""#).unwrap();
@@ -2790,6 +2873,7 @@ async fn held_goes_by_the_profile_the_run_was_queued_under_not_the_prs() {
 async fn profiles_overriding_manual_reviews_hold_their_own_and_are_listed() {
     let f = fixture(false).await;
     let queue = |number: u32, profile: &str| {
+        newer_head(&f, number);
         f.dashboard
             .app
             .store()

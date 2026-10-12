@@ -2945,3 +2945,29 @@ form.qmove {
 .queue-empty {
   color: var(--dim);
 }
+
+/* A PR whose changes touch `.claude`: its own skills and agents would load
+   into the review agent, so this can't be missed. */
+.claudehold {
+  border: 2px solid var(--bad);
+  border-radius: 4px;
+  background: var(--del);
+  color: var(--fg);
+  padding: 0.4rem 0.7rem;
+  margin: 0.3rem 0;
+}
+
+.claudehold > strong {
+  color: var(--bad);
+}
+
+.claudehold ul {
+  margin: 0.2rem 0 0;
+  padding-left: 1.2rem;
+}
+
+/* On an index row, under its cells, across all but the unseen dot. */
+.ib > .claudehold {
+  grid-column: 2 / -1;
+  font-size: 13px;
+}

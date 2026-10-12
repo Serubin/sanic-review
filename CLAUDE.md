@@ -6,9 +6,18 @@ read it before changing behaviour, and update it when behaviour changes.
 ## Invariant
 
 Nothing is posted to GitHub or pushed on the user's behalf except through an
-explicit user action (a dashboard click or a command they run). Agents spawned
-by this tool never get GitHub write credentials. Don't add code paths that
-weaken this.
+explicit user action (a dashboard click or a command they run). sanic-review
+never hands an agent GitHub credentials: it strips token variables from the
+agent's environment, and its tools can't write, run commands or reach the
+network. Skills and subagents are trusted: with Skill or Agent in an agent's
+tools, the skills and agents Claude Code loads (yours, the PR's own
+`.claude/`, and those of each `--add-dir` checkout) run as the user and could
+reach credentials stored on disk. Don't add code paths that weaken the rest of
+this, and keep the trust boundary documented in `docs/DESIGN.md` (Tools,
+Security) when it changes. A review of someone else's PR whose commits touch a
+`.claude` path, or a path a `.claude` symlink leads to, never starts unless
+the user starts it past the warning; every new way of starting a review goes
+through that hold.
 
 ## Gate
 

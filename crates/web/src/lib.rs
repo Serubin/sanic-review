@@ -16,6 +16,7 @@ mod files;
 mod filter;
 mod guard;
 mod highlight;
+mod hold;
 mod ignore;
 mod index;
 mod links;

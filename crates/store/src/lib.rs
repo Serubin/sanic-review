@@ -1,6 +1,7 @@
 //! SQLite schema, migrations and queries.
 
 mod dashboard;
+mod hold;
 mod overview;
 mod posted;
 mod runs;
@@ -49,6 +50,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0024_draft_obsolete.sql"),
     include_str!("migrations/0025_run_queue.sql"),
     include_str!("migrations/0026_thread_diff_hunk.sql"),
+    include_str!("migrations/0027_claude_hold.sql"),
 ];
 
 /// How long a write waits for another connection's write to finish.
@@ -191,6 +193,7 @@ impl Store {
     ) -> Result<()> {
         let tx = self.conn.transaction()?;
         write_snapshot(&tx, snapshot, me, profile)?;
+        hold::skip_own(&tx, snapshot, me)?;
         let repo = snapshot.key.repo.to_string();
         for trigger in triggers {
             tx.execute(

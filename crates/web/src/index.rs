@@ -29,6 +29,7 @@ use crate::{
     App, Error, Shared,
     cells::{LeadPop, ReviewedBy, plural},
     filter::{self, Facet, IndexQuery, RowValues, Side, count, hidden_line},
+    hold,
     page::{self, Kind, countdown, csrf_field, drafts, keycap, pr_ref},
     pr_href,
 };
@@ -829,6 +830,7 @@ fn owed_row(app: &App, pr: &OwedReview, overview: &Overview, back: &str) -> Mark
         skip: overview.skipped.get(&pr.key),
         waiting: waiting.as_deref(),
         manual_reviews: pr.held(&overview.manual),
+        claude_hold: pr.claude_hold.as_ref(),
         now: app.clock.now(),
     };
     let row = Row {
@@ -861,6 +863,7 @@ fn owed_row(app: &App, pr: &OwedReview, overview: &Overview, back: &str) -> Mark
             (unseen(overview, &pr.key))
             (row.cells(app, &pr.title))
             span.a { (actions) }
+            @if let Some(hold) = &pr.claude_hold { (hold::warning(&pr.key, hold)) }
         }
     }
 }
@@ -881,6 +884,7 @@ fn my_row(app: &App, pr: &MyPr, overview: &Overview, back: &str) -> Markup {
         skip: None,
         waiting: None,
         manual_reviews: run.is_some_and(|run| overview.manual.holds(&run.profile)),
+        claude_hold: None,
         now: app.clock.now(),
     };
     let row = Row {

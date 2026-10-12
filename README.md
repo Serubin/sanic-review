@@ -51,7 +51,9 @@ As implemented, not as hoped:
   read.
 - **Skills run as you.** A skill's shell commands run outside those
   limits, and the PR's own `.claude/skills` and `.claude/agents` load
-  with yours. Drop `Skill` and `Agent` from `runner.tools` unless you
+  with yours. A PR that has ever changed anything under a `.claude`
+  directory is never reviewed by itself: it's held, with a warning, until
+  you start it. Drop `Skill` and `Agent` from `runner.tools` unless you
   trust every skill the agent can find; see Tools in
   [docs/DESIGN.md](docs/DESIGN.md#runner).
 - **The agent can read what you let it read.** That includes the local

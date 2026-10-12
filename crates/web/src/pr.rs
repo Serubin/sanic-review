@@ -11,6 +11,7 @@ use axum::{
 };
 use maud::{Markup, html};
 use sanic_core::{
+    hold::ClaudeHold,
     pr::{PrKey, Thread, is_login},
     skip::Skip,
     start::Why,
@@ -25,6 +26,7 @@ use crate::{
     App, Error, PrPath, Shared, chat, diff,
     files::{self, Layout, View},
     filter::IndexQuery,
+    hold,
     index::{Overview, archive_form, owed_status, why},
     links, markdown,
     page::{self, Card, Kind, Tone, csrf_field, first_line, keycap, pr_ref, state_cell},
@@ -175,9 +177,14 @@ struct Header<'a> {
 }
 
 /// The title; the PR's ref, author, run status and state, with its
-/// actions; then its description and runs, folded.
+/// actions; then its description and runs, folded; then, if it has one,
+/// its `.claude` hold.
 fn pr_header(app: &App, h: &Header<'_>) -> Markup {
     let pr = h.pr;
+    let hold = app.store().claude_hold(&pr.key).unwrap_or_else(|err| {
+        tracing::warn!(url = %pr.key.url(), "reading the PR's `.claude` hold failed: {err:?}");
+        None
+    });
     // `—` fills a column; in a sentence it says nothing.
     let state = h.state.filter(|state| !state.is_blank());
     let status = h.owed.map(|o| owed_status(o, h.overview));
@@ -228,6 +235,7 @@ fn pr_header(app: &App, h: &Header<'_>) -> Markup {
                 @if !h.runs.is_empty() { (run_list(&pr.key, h.runs, h.shown)) }
             }
         }
+        @if let Some(hold) = &hold { (hold::warning(&pr.key, hold)) }
     }
 }
 
@@ -1217,6 +1225,23 @@ fn decided(
     Ok(Redirect::to(&back).into_response())
 }
 
+/// What holds a review, on its Review now card: a `.claude` hold, a
+/// check of its head for one, or else manual reviews.
+fn held_by(claude: Option<&ClaudeHold>) -> Markup {
+    html! {
+        @if claude.is_some_and(|h| !h.findings.is_empty()) {
+            " · held for its " code { ".claude" } " changes"
+        } @else if claude.is_some_and(ClaudeHold::warns) {
+            " · held: checking it for " code { ".claude" } " changes failed"
+        } @else if claude.is_some() {
+            " · waiting until its head is checked for " code { ".claude" }
+            " changes, which it must be before it can start"
+        } @else {
+            " · held by " a href="/settings" { "manual reviews" }
+        }
+    }
+}
+
 /// What a review started by hand costs.
 const COST: &str = "Spends tokens: a full review of the head as last polled.";
 
@@ -1233,10 +1258,11 @@ pub async fn confirm_review_now(
         .pr_page(&key)
         .map_err(Error::pr(&key))?
         .ok_or_else(|| Error::NotFound(format!("{} isn't tracked", key.url())))?;
+    let hold = owed.and_then(|pr| pr.claude_hold.as_ref());
     let href = pr_href(&key);
     let meta = html! {
         (pr_ref(&key)) " · " (pr.author) " · head " code { (short(&pr.head_sha)) }
-        @if why == Some(Why::Held) { " · held by " a href="/settings" { "manual reviews" } }
+        @if why == Some(Why::Held) { (held_by(hold)) }
     };
     let error = owed
         .and_then(|pr| pr.latest_run.as_ref())
@@ -1305,7 +1331,9 @@ pub async fn confirm_review_now(
         heading,
         title: &pr.title,
         meta,
-        extra,
+        // Whatever the reason to start it, the agent would load the PR's
+        // own skills and agents.
+        extra: html! { @if let Some(hold) = hold { (hold::warning(&key, hold)) } (extra) },
         cost,
         go,
         back: (&href, if why.is_some() { "Cancel" } else { "Back" }),

@@ -4,6 +4,7 @@
 use color_eyre::eyre::Result;
 use rusqlite::{OptionalExtension, Row, params, types::Type};
 use sanic_core::{
+    hold::ClaudeHold,
     manual::ManualReviews,
     pr::{PrKey, is_login},
     repo::RepoName,
@@ -75,6 +76,8 @@ pub struct OwedReview {
     /// The most recently queued review run, if any.
     pub latest_run: Option<LatestRun>,
     pub pending_drafts: u32,
+    /// Why its reviews never start by themselves, if they don't.
+    pub claude_hold: Option<ClaudeHold>,
 }
 
 impl OwedReview {
@@ -84,14 +87,15 @@ impl OwedReview {
         self.latest_run.as_ref().map(|run| run.status.as_str())
     }
 
-    /// Whether its latest run is queued and `manual` holds it, by the
-    /// profile it was queued under, as the worker decides: not the PR's
-    /// profile now, which a config change can have moved.
+    /// Whether its latest run is queued and held: `manual` holds it, by
+    /// the profile it was queued under, as the worker decides, not the
+    /// PR's profile now, which a config change can have moved; or the PR
+    /// has a `.claude` hold.
     #[must_use]
     pub fn held(&self, manual: &ManualReviews) -> bool {
-        self.latest_run
-            .as_ref()
-            .is_some_and(|run| run.status == "queued" && manual.holds(&run.profile))
+        self.latest_run.as_ref().is_some_and(|run| {
+            run.status == "queued" && (manual.holds(&run.profile) || self.claude_hold.is_some())
+        })
     }
 }
 
@@ -260,10 +264,12 @@ impl Store {
                     head_reviewers: Vec::new(),
                     chat_run: row.get(12)?,
                     state: PrState::default(),
+                    claude_hold: None,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for pr in &mut owed {
+            pr.claude_hold = self.claude_hold(&pr.key)?;
             pr.head_reviewers = self.head_reviewers(&pr.key, &pr.head_sha)?;
             pr.state = self.pr_state(&pr.key, me, false)?;
         }
@@ -638,6 +644,7 @@ mod tests {
         merged.review_requested = true;
         store.record(&merged, "me", "default", &[]).unwrap();
         store.mark_closed(&merged.key).unwrap();
+        store.check_all_heads();
 
         let owed = store.owed_reviews("me", None).unwrap();
         assert_eq!(
@@ -656,6 +663,7 @@ mod tests {
                 state: PrState::default(),
                 latest_run: None,
                 pending_drafts: 0,
+                claude_hold: None,
             }]
         );
 

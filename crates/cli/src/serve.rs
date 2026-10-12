@@ -24,6 +24,7 @@ use color_eyre::{
 use sanic_core::{
     clock::{RecencyWindow, SystemClock, WindowChoice},
     config::{Config, DEFAULT_API_URL, Keys, Unloadable, default_config_path, default_data_dir},
+    hold::HeadCheck,
     manual::ManualReviews,
     pr::PrKey,
     run::QueuedRun,
@@ -173,6 +174,8 @@ pub async fn run(args: ServeArgs) -> Result<()> {
 
     let mut watcher = ConfigWatcher::new(&config_path)?;
     let (updates, updates_rx) = mpsc::unbounded_channel();
+    // Queued reviews whose heads are left to check for `.claude` changes.
+    let (checks, checks_rx) = mpsc::unbounded_channel();
     let (runs, runs_rx) = mpsc::unbounded_channel();
     // Reviews started by hand, which skip any manual reviews hold.
     let (started, started_rx) = mpsc::unbounded_channel();
@@ -250,6 +253,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
             started: started_rx,
             manual: live.manual_reviews.subscribe(),
             store: Arc::clone(&run_store),
+            checks: checks.clone(),
         },
     );
     tokio::pin!(reviews);
@@ -261,6 +265,9 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         result = poll_forever(
             &mut poller, &mut watcher, &config_path, &updates, &mut refreshes_rx, &worker, &live,
         ) => result,
+        () = check_heads(checks_rx, Arc::clone(&worker), Arc::clone(&run_store), runs.clone()) => {
+            Ok(())
+        }
         result = schedule(
             updates_rx, Arc::clone(&run_store), runs.clone(), due_tx, live.skips.subscribe(),
             live.manual_reviews.subscribe(), me_for_scheduler,
@@ -268,6 +275,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         () = handle_requests(requests_rx, run_store, Arc::clone(&worker), Starter {
             manual: live.manual_reviews.subscribe(),
             start: started,
+            checks,
         }) => Ok(()),
         () = &mut reviews => Ok(()),
         result = web.serve() => result,
@@ -606,12 +614,18 @@ fn resume_queued(
         work::supersede_unlisted(&mut store, skips, None);
         store.queued_reviews()?
     };
-    let held = recovered
-        .iter()
-        .filter(|run| manual.holds(&run.request.profile))
-        .count();
+    let held = {
+        let store = store.lock().unwrap_or_else(PoisonError::into_inner);
+        recovered
+            .iter()
+            .filter(|run| held_why(manual, &store, run).is_some())
+            .count()
+    };
     if held > 0 {
-        info!(runs = held, "queued runs held: manual reviews are on");
+        info!(
+            runs = held,
+            "queued runs held: manual reviews, or a `.claude` hold"
+        );
     }
     if recovered.len() > held {
         info!(runs = recovered.len() - held, "resuming queued runs");
@@ -632,6 +646,9 @@ struct Starter {
     /// profile, its held review is the one to start.
     manual: watch::Receiver<ManualReviews>,
     start: mpsc::UnboundedSender<QueuedRun>,
+    /// Where a review whose head isn't checked for `.claude` yet goes to
+    /// be.
+    checks: mpsc::UnboundedSender<QueuedRun>,
 }
 
 /// Carries out what the TUI and `sanic-review review` ask for. Never
@@ -718,16 +735,18 @@ fn save_layout(sizes: Sizes, store: &Mutex<Store>) {
 }
 
 /// Starts a review of `key` now: its queued review if manual reviews hold
-/// the profile that was queued under; otherwise a full review of its
+/// the profile that was queued under, or its PR has a `.claude` hold;
+/// otherwise a full review of its
 /// current head is queued, as the scheduler would, so a head that already
 /// has a queued, running or succeeded review is left alone.
 fn review_now(key: &PrKey, store: &Mutex<Store>, starter: &Starter) {
     let _span = info_span!("review_now", url = %key.url()).entered();
     let run = {
         let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
+        let manual = starter.manual.borrow().clone();
         let held = store
             .queued_review(key)
-            .map(|run| run.filter(|run| starter.manual.borrow().holds(&run.request.profile)));
+            .map(|run| run.filter(|run| held_why(&manual, &store, run).is_some()));
         held.and_then(|held| match held {
             Some(run) => Ok(Some(run)),
             None => store.review_request(key).and_then(|req| match req {
@@ -736,7 +755,23 @@ fn review_now(key: &PrKey, store: &Mutex<Store>, starter: &Starter) {
             }),
         })
     };
+    let pending = |run: &QueuedRun| {
+        let store = store.lock().unwrap_or_else(PoisonError::into_inner);
+        store
+            .head_check(key, &run.request.base_sha, &run.request.head_sha)
+            .is_ok_and(|check| check == HeadCheck::Pending)
+    };
     match run {
+        // You can't have seen what it holds for yet. A failed check can
+        // be started past, under its warning.
+        Ok(Some(run)) if pending(&run) => {
+            info!(
+                head = %run.request.head_sha,
+                "not started yet: its head is still being checked for `.claude` changes; \
+                 start it again once that's done"
+            );
+            let _ = starter.checks.send(run);
+        }
         Ok(Some(run)) => {
             info!(head = %run.request.head_sha, "review started by hand");
             let _ = starter.start.send(run);
@@ -759,6 +794,9 @@ struct Inputs {
     manual: watch::Receiver<ManualReviews>,
     /// Where the held reviews are, when manual reviews are turned off.
     store: Arc<Mutex<Store>>,
+    /// Where an automatic review whose head isn't checked for `.claude`
+    /// yet goes to be.
+    checks: mpsc::UnboundedSender<QueuedRun>,
 }
 
 /// Runs queued reviews. Those from `runs` that manual reviews hold are
@@ -800,6 +838,7 @@ async fn hold(inputs: Inputs, jobs: mpsc::UnboundedSender<Job>) {
         mut started,
         mut manual,
         store,
+        checks,
     } = inputs;
     let mut holding = manual.borrow_and_update().clone();
     log_holding(&holding);
@@ -824,13 +863,27 @@ async fn hold(inputs: Inputs, jobs: mpsc::UnboundedSender<Job>) {
                 holding = now;
             }
             Some(run) = runs.recv() => {
-                if holding.holds(&run.request.profile) {
+                let (why, unchecked) = {
+                    let store = store.lock().unwrap_or_else(PoisonError::into_inner);
+                    let req = &run.request;
+                    let check = store.head_check(&req.key, &req.base_sha, &req.head_sha);
+                    (
+                        held_why(&holding, &store, &run),
+                        !check.is_ok_and(|c| c == HeadCheck::Done),
+                    )
+                };
+                // Checked only once a review of it is queued, so PRs that
+                // only involve you cost nothing.
+                if unchecked {
+                    let _ = checks.send(run.clone());
+                }
+                if let Some(why) = why {
                     info!(
                         url = %run.request.key.url(),
                         run = run.id,
                         head = %run.request.head_sha,
                         profile = %run.request.profile,
-                        "review held: manual reviews are on"
+                        "review held: {why}"
                     );
                 } else {
                     send(run, true);
@@ -842,16 +895,49 @@ async fn hold(inputs: Inputs, jobs: mpsc::UnboundedSender<Job>) {
     }
 }
 
+/// Why an automatic `run` is held, if it is: `manual` holds its profile,
+/// or a `.claude` hold does. Held if the store can't say.
+pub(crate) fn held_why(
+    manual: &ManualReviews,
+    store: &Store,
+    run: &QueuedRun,
+) -> Option<&'static str> {
+    if manual.holds(&run.request.profile) {
+        return Some("manual reviews are on");
+    }
+    match store.claude_holds_run(
+        &run.request.key,
+        &run.request.base_sha,
+        &run.request.head_sha,
+    ) {
+        Ok(why) => why,
+        Err(err) => {
+            warn!(
+                url = %run.request.key.url(),
+                "checking for a `.claude` hold failed, so holding the review: {err:?}"
+            );
+            Some("checking for a `.claude` hold failed")
+        }
+    }
+}
+
 /// The reviews manual reviews held of the profiles `released`, now that
-/// they no longer hold them.
+/// they no longer hold them, less those a `.claude` hold still keeps.
 fn held_reviews(store: &Mutex<Store>, released: impl Fn(&str) -> bool) -> Vec<QueuedRun> {
-    let held = store
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .queued_reviews();
-    match held {
+    let store = store.lock().unwrap_or_else(PoisonError::into_inner);
+    match store.queued_reviews() {
         Ok(mut held) => {
-            held.retain(|run| released(&run.request.profile));
+            // Those a `.claude` hold keeps would only nudge the worker.
+            held.retain(|run| {
+                released(&run.request.profile)
+                    && store
+                        .claude_holds_run(
+                            &run.request.key,
+                            &run.request.base_sha,
+                            &run.request.head_sha,
+                        )
+                        .is_ok_and(|why| why.is_none())
+            });
             if !held.is_empty() {
                 info!(
                     reviews = held.len(),
@@ -1041,6 +1127,48 @@ async fn refresh_queued<G: GithubApi>(
     Ok((triggered, backoff))
 }
 
+/// Checks the head of each queued review sent, on its base, for
+/// `.claude` changes, one at a time, since each may fetch into a mirror,
+/// then, if it got done, hands the PR's queued review, if any, to `runs`,
+/// which holds it if something else still does. A failed check isn't
+/// handed back, which would only ask for it again; it's tried again when
+/// a review of that head is next queued or `serve` next starts. Never
+/// returns while `checks` is open.
+async fn check_heads(
+    mut checks: mpsc::UnboundedReceiver<QueuedRun>,
+    worker: Arc<Worker>,
+    store: Arc<Mutex<Store>>,
+    runs: mpsc::UnboundedSender<QueuedRun>,
+) {
+    while let Some(run) = checks.recv().await {
+        let req = &run.request;
+        let check = |store: &Mutex<Store>| {
+            store
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .head_check(&req.key, &req.base_sha, &req.head_sha)
+        };
+        // An earlier request for the same head finished it.
+        if check(&store).is_ok_and(|c| c == HeadCheck::Done) {
+            continue;
+        }
+        worker
+            .check_head(&req.key, &req.base_sha, &req.head_sha)
+            .instrument(info_span!("check_head", url = %req.key.url()))
+            .await;
+        if !check(&store).is_ok_and(|c| c == HeadCheck::Done) {
+            continue;
+        }
+        let queued = store
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .queued_review(&req.key);
+        if let Ok(Some(run)) = queued {
+            let _ = runs.send(run);
+        }
+    }
+}
+
 /// Queues every refresh the dashboard has asked for so far, first.
 fn take_asked(asked: &mut mpsc::UnboundedReceiver<PrKey>, pending: &mut RefreshQueue) {
     while let Ok(key) = asked.try_recv() {
@@ -1143,7 +1271,9 @@ fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use sanic_core::{pr::PrSnapshot, repo::RepoName};
+    use sanic_core::{pr::PrSnapshot, repo::RepoName, run::ReviewTrigger};
+
+    use sanic_core::hold::Finding;
 
     use super::*;
 
@@ -1157,9 +1287,12 @@ mod tests {
         .unwrap()
     }
 
+    /// A store with `key` tracked, its head checked for `.claude` with
+    /// nothing found.
     fn store_with_pr(key: &PrKey) -> Store {
         let mut store = Store::open_in_memory().unwrap();
         store.record(&pr_snapshot(key), "me", "p", &[]).unwrap();
+        store.record_check(key, "b1", "h1", Ok(&[])).unwrap();
         store
     }
 
@@ -1221,6 +1354,7 @@ mod tests {
                 Starter {
                     manual: watch::channel(manual).1,
                     start,
+                    checks: mpsc::unbounded_channel().0,
                 },
             ),
         );
@@ -1418,6 +1552,7 @@ mod tests {
                 started: started_rx,
                 manual: manual_rx,
                 store: Arc::new(Mutex::new(store)),
+                checks: mpsc::unbounded_channel().0,
             },
             jobs,
         ));
@@ -1471,6 +1606,7 @@ mod tests {
                 started: started_rx,
                 manual: manual_rx,
                 store: Arc::new(Mutex::new(store)),
+                checks: mpsc::unbounded_channel().0,
             },
             jobs,
         ));
@@ -1502,6 +1638,117 @@ mod tests {
         drop((runs, started, manual));
         gate.await.unwrap();
         assert_eq!(jobs_rx.recv().await, None);
+    }
+
+    /// A store with `key` tracked, and a `.claude` hold on it.
+    fn store_with_claude_hold(key: &PrKey) -> Store {
+        let mut store = store_with_pr(key);
+        let found = [Finding::Path(".claude/skills/x/SKILL.md".into())];
+        store.record_check(key, "b1", "h1", Ok(&found)).unwrap();
+        store
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r_doesnt_start_a_head_still_being_checked_but_does_one_that_failed() {
+        let key = key();
+        let mut store = Store::open_in_memory().unwrap();
+        store.record(&pr_snapshot(&key), "me", "p", &[]).unwrap();
+        let queued = store
+            .queue_review(&store.review_request(&key).unwrap().unwrap())
+            .unwrap()
+            .unwrap();
+        let store = Arc::new(Mutex::new(store));
+        let rerun = || vec![Request::Rerun(key.clone())];
+        assert!(
+            handle(&store, ManualReviews::default(), rerun())
+                .await
+                .is_empty()
+        );
+        store
+            .lock()
+            .unwrap()
+            .record_check(&key, "b1", "h1", Err("boom"))
+            .unwrap();
+        assert_eq!(
+            handle(&store, ManualReviews::default(), rerun()).await,
+            [queued]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_claude_hold_keeps_every_automatic_review_whatever_manual_reviews_say() {
+        let key = key();
+        let mut store = store_with_claude_hold(&key);
+        let requested = store
+            .queue_review(&store.review_request(&key).unwrap().unwrap())
+            .unwrap()
+            .unwrap();
+        let mut push = store.review_request(&key).unwrap().unwrap();
+        push.head_sha = "h2".into();
+        push.trigger = ReviewTrigger::Push {
+            from_sha: "h1".into(),
+        };
+        let pushed = store.queue_review(&push).unwrap().unwrap();
+        let store = Arc::new(Mutex::new(store));
+        let (runs, runs_rx) = mpsc::unbounded_channel();
+        let (started, started_rx) = mpsc::unbounded_channel();
+        let (manual, manual_rx) = watch::channel(ManualReviews::runner(true));
+        let (jobs, mut jobs_rx) = mpsc::unbounded_channel();
+        let (checks, mut checks_rx) = mpsc::unbounded_channel();
+        let gate = tokio::spawn(hold(
+            Inputs {
+                runs: runs_rx,
+                started: started_rx,
+                manual: manual_rx,
+                store: Arc::clone(&store),
+                checks,
+            },
+            jobs,
+        ));
+
+        // Turning manual reviews off releases neither, and neither a
+        // request's review nor a push's goes through.
+        manual.send_replace(ManualReviews::runner(false));
+        tokio::task::yield_now().await;
+        runs.send(requested.clone()).unwrap();
+        runs.send(pushed.clone()).unwrap();
+        // Started by hand, it goes through.
+        started.send(pushed.clone()).unwrap();
+        assert_eq!(
+            jobs_rx.recv().await,
+            Some(Job {
+                run: pushed.clone(),
+                automatic: false
+            })
+        );
+        drop((runs, started, manual));
+        gate.await.unwrap();
+        assert_eq!(jobs_rx.recv().await, None);
+        // Only the push's head, which isn't checked yet, is left to check.
+        assert_eq!(checks_rx.recv().await, Some(pushed));
+        assert_eq!(checks_rx.recv().await, None);
+        // Nor does the worker take it from the queue.
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .claim_next(|_| false)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r_starts_a_claude_held_run_with_manual_reviews_off() {
+        let key = key();
+        let mut store = store_with_claude_hold(&key);
+        let queued = store
+            .queue_review(&store.review_request(&key).unwrap().unwrap())
+            .unwrap()
+            .unwrap();
+        let store = Arc::new(Mutex::new(store));
+        let started = handle(&store, ManualReviews::default(), vec![Request::Rerun(key)]).await;
+        assert_eq!(started, [queued]);
     }
 
     #[test]

@@ -271,6 +271,7 @@ mod tests {
             state: sanic_core::state::PrState::default(),
             latest_run: None,
             pending_drafts: 0,
+            claude_hold: None,
         }
     }
 

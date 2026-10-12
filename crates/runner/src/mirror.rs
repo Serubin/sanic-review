@@ -5,7 +5,7 @@
 //! checks the head out as a detached worktree, which it removes afterwards.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::TryLockError,
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
@@ -17,7 +17,11 @@ use color_eyre::{
     Section,
     eyre::{Result, WrapErr, eyre},
 };
-use sanic_core::{pr::PrKey, repo::RepoName};
+use sanic_core::{
+    hold::{ClaudeLink, is_claude_path},
+    pr::PrKey,
+    repo::RepoName,
+};
 use tokio::process::Command;
 
 use crate::diff::{CONTEXT, LineMap};
@@ -188,35 +192,42 @@ impl Mirrors {
             .clone()
     }
 
-    /// Fetches `key`'s head and base into the mirror from
-    /// `<git_url>/<owner>/<name>.git`, unless it has both already, then
-    /// checks `head_sha` out at `dest`, replacing anything a previous
-    /// attempt left there. Tells `progress` each [`Step`] as it starts.
-    pub async fn checkout(
+    /// Takes `repo`'s mirror for a fetch, in this process and across
+    /// processes, telling `progress` once if it has to wait.
+    async fn take(
         &self,
-        git_url: &str,
-        key: &PrKey,
-        head_sha: &str,
-        base_sha: &str,
-        dest: &Path,
-        mut progress: impl FnMut(Step),
-    ) -> Result<Worktree> {
-        let lock = self.lock(&key.repo);
+        repo: &RepoName,
+        progress: &mut impl FnMut(Step),
+    ) -> Result<(tokio::sync::OwnedMutexGuard<()>, std::fs::File)> {
+        let lock = self.lock(repo);
         let mut waited = false;
-        let _guard = if let Ok(guard) = lock.try_lock() {
+        let guard = if let Ok(guard) = Arc::clone(&lock).try_lock_owned() {
             guard
         } else {
             waited = true;
             progress(Step::Waiting);
-            lock.lock().await
+            lock.lock_owned().await
         };
-        let mirror = self.mirror_path(&key.repo);
-        let _file_guard = lock_file(&lock_path(&mirror), || {
+        let file = lock_file(&lock_path(&self.mirror_path(repo)), || {
             if !waited {
                 progress(Step::Waiting);
             }
         })
         .await?;
+        Ok((guard, file))
+    }
+
+    /// Fetches `key`'s head and base into the mirror, which the caller has
+    /// taken, unless it has both already.
+    async fn fetch(
+        &self,
+        git_url: &str,
+        key: &PrKey,
+        head_sha: &str,
+        base_sha: &str,
+        progress: &mut impl FnMut(Step),
+    ) -> Result<PathBuf> {
+        let mirror = self.mirror_path(&key.repo);
         tokio::fs::create_dir_all(&mirror)
             .await
             .wrap_err_with(|| format!("creating {}", mirror.display()))?;
@@ -250,6 +261,56 @@ impl Mirrors {
                 ));
             }
         }
+        Ok(mirror)
+    }
+
+    /// What `key`'s `head_sha` on `base_sha` needs for its `.claude`
+    /// check, from the mirror, fetching the head and base as a checkout
+    /// does: every path any of the PR's commits touches, and the symlinks
+    /// with a `.claude` component in the head's tree.
+    pub async fn claude_tree(
+        &self,
+        git_url: &str,
+        key: &PrKey,
+        head_sha: &str,
+        base_sha: &str,
+    ) -> Result<ClaudeTree> {
+        let mut progress = |_| {};
+        let _taken = self.take(&key.repo, &mut progress).await?;
+        let mirror = self
+            .fetch(git_url, key, head_sha, base_sha, &mut progress)
+            .await?;
+        let merge_base = git(&mirror, &["merge-base", base_sha, head_sha])
+            .await?
+            .trim()
+            .to_owned();
+        Ok(ClaudeTree {
+            touched: touched(&mirror, &merge_base, head_sha)
+                .await
+                .wrap_err_with(|| format!("listing what {} touches", key.url()))?,
+            links: claude_links(&mirror, head_sha)
+                .await
+                .wrap_err_with(|| format!("reading the symlinks of {} at {head_sha}", key.url()))?,
+        })
+    }
+
+    /// Fetches `key`'s head and base into the mirror from
+    /// `<git_url>/<owner>/<name>.git`, unless it has both already, then
+    /// checks `head_sha` out at `dest`, replacing anything a previous
+    /// attempt left there. Tells `progress` each [`Step`] as it starts.
+    pub async fn checkout(
+        &self,
+        git_url: &str,
+        key: &PrKey,
+        head_sha: &str,
+        base_sha: &str,
+        dest: &Path,
+        mut progress: impl FnMut(Step),
+    ) -> Result<Worktree> {
+        let _taken = self.take(&key.repo, &mut progress).await?;
+        let mirror = self
+            .fetch(git_url, key, head_sha, base_sha, &mut progress)
+            .await?;
         let merge_base = git(&mirror, &["merge-base", base_sha, head_sha])
             .await?
             .trim()
@@ -421,6 +482,138 @@ async fn remove_worktree(mirror: &Path, path: &Path) {
     let _ = git(mirror, &["worktree", "prune"]).await;
 }
 
+/// What a head's `.claude` check reads from the mirror.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClaudeTree {
+    /// Every path a commit from the merge base to the head touches, each
+    /// once: a file changed and changed back still counts, as do both
+    /// sides of a rename, and a merge's own resolutions.
+    pub touched: Vec<String>,
+    /// The symlinks with a `.claude` component in the head's tree.
+    pub links: Vec<ClaudeLink>,
+}
+
+/// Every path a commit in `merge_base..head` touches. A merge counts
+/// only for what it changes beyond its parents, so merging the base in
+/// brings none of the base's paths.
+async fn touched(mirror: &Path, merge_base: &str, head: &str) -> Result<Vec<String>> {
+    let range = format!("{merge_base}..{head}");
+    let out = git_bytes(
+        mirror,
+        &[
+            "-c",
+            "core.quotePath=false",
+            "log",
+            "--no-renames",
+            "--cc",
+            "--name-only",
+            "--format=",
+            "-z",
+            &range,
+        ],
+    )
+    .await?;
+    let mut seen = HashSet::new();
+    Ok(out
+        .split(|&b| b == 0 || b == b'\n')
+        .filter(|path| !path.is_empty() && seen.insert(*path))
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect())
+}
+
+/// The symlinks in `head`'s tree with a `.claude` component, the directory
+/// itself included, at any depth, each with where it leads in the
+/// repository, following links to links. One that leads outside the
+/// repository, or round in a loop, is left out: the PR can't change what
+/// it leads to.
+async fn claude_links(mirror: &Path, head: &str) -> Result<Vec<ClaudeLink>> {
+    let tree = git_bytes(mirror, &["ls-tree", "-r", "-z", "--full-tree", head]).await?;
+    // Each entry is `<mode> <type> <object>\t<path>`, NUL-terminated.
+    let links: HashMap<String, String> = tree
+        .split(|&b| b == 0)
+        .filter_map(|entry| {
+            // Lossily, as `touched` reads paths, so a link at a path
+            // that isn't UTF-8 is still found.
+            let entry = String::from_utf8_lossy(entry);
+            let (meta, path) = entry.split_once('\t')?;
+            let mut meta = meta.split(' ');
+            (meta.next()? == "120000").then_some(())?;
+            Some((path.to_owned(), meta.nth(1)?.to_owned()))
+        })
+        .collect();
+    let mut found = Vec::new();
+    for link in links.keys().filter(|path| is_claude_path(path)) {
+        if let Some(target) = resolve(mirror, &links, link).await? {
+            found.push(ClaudeLink {
+                link: link.clone(),
+                target,
+            });
+        }
+    }
+    found.sort_by(|a, b| a.link.cmp(&b.link));
+    Ok(found)
+}
+
+/// How many links a chain may pass through before it's taken for a loop:
+/// Linux's own limit, so no chain a checkout would follow is left out.
+const MAX_HOPS: usize = 40;
+
+/// Where `link` leads in the repository, given every symlink in the tree
+/// (`links`, path to blob), following links to links, including ones in
+/// the middle of the path; `None` if it leads outside the repository or
+/// loops.
+async fn resolve(
+    mirror: &Path,
+    links: &HashMap<String, String>,
+    link: &str,
+) -> Result<Option<String>> {
+    let mut path = link.to_owned();
+    for _ in 0..MAX_HOPS {
+        // The first component of `path` that's itself a link, if any.
+        let parts: Vec<&str> = path.split('/').collect();
+        let hop = (1..=parts.len()).find_map(|n| {
+            let prefix = parts[..n].join("/");
+            links.get(&prefix).map(|blob| (prefix, n, blob))
+        });
+        let Some((prefix, n, blob)) = hop else {
+            return Ok(Some(path));
+        };
+        let target = git(mirror, &["cat-file", "blob", blob])
+            .await
+            .wrap_err_with(|| format!("reading the link {prefix}"))?;
+        let parent = prefix.rsplit_once('/').map_or("", |(dir, _)| dir);
+        let Some(resolved) = join_in_repo(parent, &target) else {
+            return Ok(None);
+        };
+        let rest = parts[n..].join("/");
+        path = [resolved, rest]
+            .into_iter()
+            .filter(|p| !p.is_empty())
+            .collect::<Vec<_>>()
+            .join("/");
+    }
+    Ok(None)
+}
+
+/// `target`, a link's contents, from `dir`, as a path in the repository;
+/// `None` if it's absolute or climbs out of the repository.
+fn join_in_repo(dir: &str, target: &str) -> Option<String> {
+    if target.starts_with('/') {
+        return None;
+    }
+    let mut parts: Vec<&str> = dir.split('/').filter(|p| !p.is_empty()).collect();
+    for part in target.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            part => parts.push(part),
+        }
+    }
+    Some(parts.join("/"))
+}
+
 /// Whether `mirror` has `commit` as a commit.
 async fn has_commit(mirror: &Path, commit: &str) -> bool {
     git(mirror, &["cat-file", "-e", &format!("{commit}^{{commit}}")])
@@ -467,6 +660,12 @@ fn git_stdout(args: &[&str], output: std::io::Result<Output>) -> Result<Vec<u8>>
 /// Runs git in `repo` and waits, returning stdout as it is.
 fn git_blocking(repo: &Path, args: &[&str]) -> Result<Vec<u8>> {
     git_stdout(args, git_command(repo, args).output())
+}
+
+/// Runs git in `repo`, returning stdout as it is.
+async fn git_bytes(repo: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    let output = Command::from(git_command(repo, args)).output().await;
+    git_stdout(args, output)
 }
 
 /// Runs git in `repo`, returning stdout, which is decoded lossily because

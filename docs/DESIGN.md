@@ -85,6 +85,63 @@ starts that profile's held reviews the same way. Turning it on asks
 nothing: running reviews carry on, and queued ones are held from then on,
 including those already waiting for a free slot.
 
+**The `.claude` hold** keeps a PR's reviews from ever starting by
+themselves once any head of it that sanic-review has checked reached a
+`.claude` directory. With Skill or Agent in a review's tools, such a
+PR's own skills and agents would load into the agent and could run
+shell commands as you (see Tools under Runner); the hold is how
+sanic-review keeps that from happening unattended. It's only for
+reviews of other people's PRs: your own are never checked or held.
+- **What reaches `.claude`.** A path any of the PR's commits touches,
+  from the merge base of its base and head to the head, with a
+  `.claude` component, at any depth and in any case, since a
+  case-insensitive filesystem checks `.Claude` out as `.claude`
+  (`.claude/skills/x/SKILL.md`, `sub/.claude/agents/y.md`, not
+  `foo.claude/x`). Every commit counts, not just the PR's net diff, so a
+  file added and removed again still does, as do both sides of a rename.
+  A merge counts only for what it changes beyond its parents, so merging
+  the base in brings none of the base's paths. And a path the commits
+  touch under where a symlink with a `.claude` component in the head's
+  tree leads, the `.claude` directory itself being a link included,
+  following links to links and matching paths in any case; one that
+  leads outside the repository can't be changed by the PR and doesn't
+  count.
+- **Checking a head.** A head is checked on its base, by their SHAs, so
+  a new head, a retarget or a base that moved is checked again. The
+  check is lazy: it runs when a review of that head is queued, or queued
+  again when `serve` starts, so PRs that only involve you cost nothing.
+  A checker task takes one at a time, fetches the head and base into the
+  repository's mirror, as a review would, and reads what the commits
+  touch (`git log`) and the head's symlinks (`git ls-tree`) there, not
+  from GitHub's API. When a check is done, it hands the PR's queued
+  review back to be held or started.
+- **Until its head is checked**, a review is held, on any trigger, and
+  starting it by hand is refused, since nothing could have warned you
+  yet; the refusal asks for the check. If the fetch or `git` fails, the
+  check is marked failed, with why, and the review stays held under a
+  warning that says so; a hand start runs it. The check is tried again
+  when a review of that head is next queued, or `serve` next starts.
+- **Sticky.** What a head shows is recorded with the head that first
+  showed it, for good: a later push that reverts the change leaves the
+  hold. A record also names the PR whose changes it's in, the held PR
+  itself for now, so a paired PR in another repository can hold it too
+  once pairing exists.
+- **Effect.** A held PR's reviews are queued as usual and held as manual
+  reviews hold theirs, on any trigger, whatever `manual_reviews` says:
+  the worker never takes them from the queue, turning manual reviews off
+  doesn't start them, and they don't count among the reviews it would
+  start. Starting one by hand (`r`, Review now, `sanic-review review`)
+  runs it.
+- **Warning.** On the dashboard, the PR's index row, its page, its Review
+  now card, its Agent… card and its chat section each show a red box that
+  lists what reaches `.claude` (each path, or the link it's under), the
+  head that first showed each, a failed check and why it all matters.
+  The Review now card says the review is held for its `.claude` changes.
+  The TUI adds a red line under the PR's row saying the same, and
+  `sanic-review chat` prints the warning before it starts. While a queued
+  review only waits for its head's check, they say so quietly instead; a
+  PR with no review queued shows no check at all.
+
 `sanic-review chat <PR url | run id> [--allow-edits] [--print-command]`
 resumes the agent session of a PR's latest run that has one (or of that
 run), so you can ask the reviewer about its review. Claude Code keys
@@ -751,9 +808,12 @@ sanic-review trusts your skills, and with them the PR author's:
   the file tools to the worktree and `--add-dir`s. A skill set to run in
   a forked context runs as a subagent too.
 
-To narrow this, drop `Skill`, `Agent` or both from `runner.tools` or a
-profile's `tools`; `procedure` still works without them, since it's
-inlined, and so do `skills`, which the agent reads with Read. Listing
+The `.claude` hold (see Process model) keeps a PR that changes `.claude`
+from being reviewed until you've looked: its reviews start only by hand,
+under a warning. Beyond that, to narrow this, drop `Skill`, `Agent` or
+both from `runner.tools` or a profile's `tools`; `procedure` still
+works without them, since it's inlined, and so do `skills`, which the
+agent reads with Read. Listing
 only directories you trust as `procedure`, `skills`, `read_paths` or
 checkouts narrows what your own config adds, but not the PR's own
 `.claude`. Claude Code also has switches sanic-review doesn't pass
@@ -1785,8 +1845,10 @@ checkout's `.workspaces/`, never in your working copy. If the checkout has
   outside `--tools` and, as far as Claude Code documents, `--restricted`,
   and the PR's own `.claude/skills` and `.claude/agents`, and those of
   each `--add-dir` checkout, load with yours. Whether subagents keep
-  `--restricted`'s file confinement isn't documented either. Tools under
-  Runner says how to narrow both.
+  `--restricted`'s file confinement isn't documented either. A PR whose
+  changes touch `.claude` is never reviewed unattended (the `.claude`
+  hold, under Process model); Tools under Runner says how to narrow the
+  rest.
 - The GitHub token lives only in the serve process, and only the web task's
   submit path writes with it: reviews, their replies and 👍s.
 - Every agent, whether a review, a regeneration or a chat, runs without

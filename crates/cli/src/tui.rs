@@ -1583,6 +1583,27 @@ fn owed_row<'a>(pr: &'a OwedReview, overview: &Overview) -> ListItem<'a> {
         Span::raw(pr.title.as_str()),
         Span::raw(format!(" ({})", pr.author)).dim(),
     ])];
+    if let Some(hold) = &pr.claude_hold {
+        let (text, style) = if hold.warns() {
+            (
+                format!(
+                    "⚠ held for .claude ({}): its skills can run commands as you; reviews \
+                     start only with r",
+                    hold.paths().join("; ")
+                ),
+                Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            (
+                "checking this head for .claude changes; its review waits".to_owned(),
+                Style::new().fg(Color::DarkGray),
+            )
+        };
+        lines.push(Line::from(vec![
+            Span::raw(" ".repeat(OWED_STATE_WIDTH + STATUS_WIDTH)),
+            Span::styled(text, style),
+        ]));
+    }
     // Only the latest run's error: an older failure a later run replaced
     // doesn't need attention.
     if let Some(error) = latest.and_then(|run| run.error.as_deref()) {
@@ -1842,7 +1863,11 @@ fn render_popup(frame: &mut Frame<'_>, title: &str, lines: Vec<Line<'_>>) {
 mod tests {
     use ratatui::{Terminal, backend::TestBackend};
     use sanic_core::state::{Approval, Checks};
-    use sanic_core::{pr::PrKey, repo::RepoName};
+    use sanic_core::{
+        hold::{ClaudeFinding, ClaudeHold, Finding, HeadCheck},
+        pr::PrKey,
+        repo::RepoName,
+    };
     use sanic_store::LatestRun;
 
     use super::*;
@@ -1880,6 +1905,7 @@ mod tests {
             state: PrState::default(),
             latest_run: None,
             pending_drafts: 0,
+            claude_hold: None,
         }
     }
 
@@ -2223,6 +2249,14 @@ mod tests {
                 in_progress: None,
             };
             store.record(&snapshot, "me", "p", &[]).unwrap();
+            store
+                .record_check(
+                    &snapshot.key,
+                    &snapshot.base_sha,
+                    &snapshot.head_sha,
+                    Ok(&[]),
+                )
+                .unwrap();
         }
         let (window_tx, window) = watch::channel(Some(14));
         let shared = shared(Arc::new(FixedClock), window);
@@ -2272,6 +2306,14 @@ mod tests {
                 in_progress: None,
             };
             store.record(&snapshot, "me", "p", &[]).unwrap();
+            store
+                .record_check(
+                    &snapshot.key,
+                    &snapshot.base_sha,
+                    &snapshot.head_sha,
+                    Ok(&[]),
+                )
+                .unwrap();
         }
         let request = store.review_request(&pr("org/repo", 1)).unwrap().unwrap();
         let run = store.queue_review(&request).unwrap().unwrap();
@@ -2608,6 +2650,34 @@ mod tests {
     }
 
     #[test]
+    fn a_claude_hold_shows_on_its_row_and_holds_its_queued_review() {
+        let key = pr("org/web", 91);
+        let mut app = App::new();
+        app.set_overview(Overview {
+            owed: vec![OwedReview {
+                latest_run: Some(latest("queued", None)),
+                claude_hold: Some(ClaudeHold {
+                    findings: vec![ClaudeFinding {
+                        finding: Finding::Path("tools/.claude/agents/a.md".into()),
+                        source: key.clone(),
+                        head_sha: "h1".into(),
+                    }],
+                    head: HeadCheck::Done,
+                }),
+                ..owed("org/web", 91, "Agents", "erin")
+            }],
+            ..Overview::default()
+        });
+        let screen = draw(&mut app, 160, 16).backend().to_string();
+        let row = screen.lines().find(|l| l.contains("Agents")).unwrap();
+        assert!(row.contains("held"), "manual reviews are off: {row}");
+        assert!(
+            screen.contains("⚠ held for .claude (tools/.claude/agents/a.md)"),
+            "{screen}"
+        );
+    }
+
+    #[test]
     fn held_goes_by_the_profile_the_run_was_queued_under_not_the_prs() {
         // `ring` holds its own; the runner's is off.
         let manual = ManualReviews {
@@ -2778,6 +2848,14 @@ mod tests {
             let queued = pr("org/web", number);
             let snapshot = crate::poll::tests::snapshot(&queued, "alice", &[]);
             store.record(&snapshot, "me", profile, &[]).unwrap();
+            store
+                .record_check(
+                    &snapshot.key,
+                    &snapshot.base_sha,
+                    &snapshot.head_sha,
+                    Ok(&[]),
+                )
+                .unwrap();
             let request = store.review_request(&queued).unwrap().unwrap();
             store.queue_review(&request).unwrap().unwrap();
         }
@@ -2833,6 +2911,14 @@ mod tests {
             let queued = pr("org/web", number);
             let snapshot = crate::poll::tests::snapshot(&queued, "alice", &[]);
             store.record(&snapshot, "me", "p", &[]).unwrap();
+            store
+                .record_check(
+                    &snapshot.key,
+                    &snapshot.base_sha,
+                    &snapshot.head_sha,
+                    Ok(&[]),
+                )
+                .unwrap();
             let request = store.review_request(&queued).unwrap().unwrap();
             store.queue_review(&request).unwrap().unwrap();
         };
@@ -2858,6 +2944,14 @@ mod tests {
         let held = pr("org/web", 77);
         let snapshot = crate::poll::tests::snapshot(&held, "alice", &[]);
         store.record(&snapshot, "me", "p", &[]).unwrap();
+        store
+            .record_check(
+                &snapshot.key,
+                &snapshot.base_sha,
+                &snapshot.head_sha,
+                Ok(&[]),
+            )
+            .unwrap();
         let request = store.review_request(&held).unwrap().unwrap();
         store.queue_review(&request).unwrap().unwrap();
         for (broken, why) in [
