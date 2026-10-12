@@ -3,7 +3,8 @@
 //!
 //! It keeps the review's limits: `--restricted` and `--strict-mcp-config`,
 //! so the PR's own `.claude/settings.json` and `.mcp.json` don't load, the
-//! read-only tool set unless edits are allowed, and no GitHub token.
+//! profile's tools, or a fixed set when edits are allowed, and no GitHub
+//! token.
 
 use std::{
     path::{Path, PathBuf},
@@ -11,11 +12,12 @@ use std::{
 };
 
 use crate::{
-    claude::{READ_ONLY_TOOLS, TOKEN_VARS, token_vars},
+    claude::{TOKEN_VARS, token_vars},
     prompt::CHAT_ENVIRONMENT,
 };
 
-/// Tools a chat with `--allow-edits` may use.
+/// The tools a chat with `--allow-edits` gets, whatever the profile's are:
+/// no Agent or Skill, so nothing it loads can edit beside it.
 pub const EDIT_TOOLS: &str = "Read,Grep,Glob,Edit,Write";
 
 /// How to resume a run's session. The web dashboard shows
@@ -31,17 +33,19 @@ pub struct ChatCommand {
     /// The run's other directories: its run dir, procedure, skills and
     /// reference checkouts.
     pub add_dirs: Vec<PathBuf>,
-    /// Adds Edit and Write. Only the worktree is given then, so nothing
-    /// outside it can be edited.
+    /// The profile's tools, unless edits are allowed.
+    pub tools: Vec<String>,
+    /// [`EDIT_TOOLS`] in place of `tools`. Only the worktree is given
+    /// then, so nothing outside it can be edited.
     pub allow_edits: bool,
 }
 
 impl ChatCommand {
     fn args(&self) -> Vec<String> {
         let tools = if self.allow_edits {
-            EDIT_TOOLS
+            EDIT_TOOLS.to_owned()
         } else {
-            READ_ONLY_TOOLS
+            self.tools.join(",")
         };
         let mut args: Vec<String> = [
             "--resume",
@@ -49,9 +53,9 @@ impl ChatCommand {
             "--restricted",
             "--strict-mcp-config",
             "--tools",
-            tools,
+            &tools,
             "--allowedTools",
-            tools,
+            &tools,
             // The review's system prompt isn't kept with its session.
             "--append-system-prompt",
             CHAT_ENVIRONMENT,
@@ -147,6 +151,9 @@ mod tests {
             session_id: "sess-9".into(),
             cwd: "/data/worktrees/3".into(),
             add_dirs: vec!["/data/runs/3".into(), "/src/lib's".into()],
+            tools: ["Read", "Grep", "Glob", "Agent", "Skill"]
+                .map(String::from)
+                .into(),
             allow_edits,
         }
     }
@@ -166,9 +173,9 @@ mod tests {
                 "--restricted",
                 "--strict-mcp-config",
                 "--tools",
-                "Read,Grep,Glob",
+                "Read,Grep,Glob,Agent,Skill",
                 "--allowedTools",
-                "Read,Grep,Glob",
+                "Read,Grep,Glob,Agent,Skill",
                 "--append-system-prompt",
                 CHAT_ENVIRONMENT,
                 "--add-dir",
@@ -204,7 +211,10 @@ mod tests {
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        assert!(args.contains(&EDIT_TOOLS.to_owned()));
+        assert!(
+            args.windows(2).any(|a| a == ["--tools", EDIT_TOOLS]),
+            "the profile's Agent and Skill aren't kept: {args:?}"
+        );
         assert!(!args.contains(&"--add-dir".to_owned()));
     }
 
@@ -215,7 +225,8 @@ mod tests {
             format!(
                 "cd /data/worktrees/3 && env -u GH_TOKEN -u 'odd name' '/opt/my claude' \
                  --resume sess-9 --restricted \
-                 --strict-mcp-config --tools Read,Grep,Glob --allowedTools Read,Grep,Glob \
+                 --strict-mcp-config --tools Read,Grep,Glob,Agent,Skill \
+                 --allowedTools Read,Grep,Glob,Agent,Skill \
                  --append-system-prompt {} \
                  --add-dir /data/runs/3 --add-dir '/src/lib'\\''s'",
                 quote(CHAT_ENVIRONMENT)

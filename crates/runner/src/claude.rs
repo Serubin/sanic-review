@@ -1,8 +1,10 @@
 //! Headless `claude -p` invocations.
 //!
 //! The agent is capability-limited rather than trusted: it gets read-only
-//! tools, no MCP servers, file access confined to the directories it's
-//! given, and an environment with no GitHub token.
+//! tools (its profile's, which the config checks against
+//! [`sanic_core::config::SAFE_TOOLS`]), no MCP servers, file access
+//! confined to the directories it's given, and an environment with no
+//! GitHub token.
 
 use std::{
     ffi::{OsStr, OsString},
@@ -17,9 +19,6 @@ use color_eyre::{
 };
 use serde_json::Value;
 use tokio::{io::AsyncWriteExt, process::Command};
-
-/// Tools a review agent may use.
-pub const READ_ONLY_TOOLS: &str = "Read,Grep,Glob";
 
 /// The environment variables `gh` and GitHub's tooling read a token from,
 /// which a command to paste unsets whether or not they're set here.
@@ -66,6 +65,8 @@ pub struct Invocation<'a> {
     pub cwd: &'a Path,
     /// Further directories the agent may read.
     pub add_dirs: &'a [PathBuf],
+    /// The tools it may use: the profile's.
+    pub tools: &'a [String],
     /// Sent on stdin, which has no length limit, unlike arguments.
     pub prompt: &'a str,
     pub system_prompt: &'a str,
@@ -119,6 +120,7 @@ impl Claude {
     }
 
     fn command(&self, inv: &Invocation<'_>) -> Result<Command> {
+        let tools = inv.tools.join(",");
         let mut cmd = Command::new(&self.program);
         cmd.current_dir(inv.cwd)
             .args(["-p", "--output-format", "stream-json", "--verbose"])
@@ -128,8 +130,8 @@ impl Claude {
             .arg(inv.system_prompt)
             // `--tools` limits which tools exist, `--allowedTools` lets them
             // run without a prompt, and nobody is there to answer one.
-            .args(["--tools", READ_ONLY_TOOLS])
-            .args(["--allowedTools", READ_ONLY_TOOLS])
+            .args(["--tools", &tools])
+            .args(["--allowedTools", &tools])
             .args(["--permission-prompts", "none"])
             // Confines file tools to `cwd` and `--add-dir`s, so the agent
             // can't read credentials elsewhere in your home directory. It
@@ -290,6 +292,7 @@ mod tests {
         Invocation {
             cwd: Path::new("/wt"),
             add_dirs: dirs,
+            tools: &[],
             prompt: "p",
             system_prompt: "s",
             schema,
@@ -323,11 +326,16 @@ mod tests {
     }
 
     #[test]
-    fn the_agent_gets_read_only_tools_and_no_github_token() {
+    fn the_agent_gets_its_profiles_tools_and_no_github_token() {
         let schema = json!({});
         let dirs = [PathBuf::from("/skills")];
         let claude = Claude::new("claude".into(), Duration::from_secs(1));
-        let cmd = claude.command(&invocation(&schema, &dirs)).unwrap();
+        let tools = ["Read", "Grep", "Skill"].map(String::from);
+        let inv = Invocation {
+            tools: &tools,
+            ..invocation(&schema, &dirs)
+        };
+        let cmd = claude.command(&inv).unwrap();
         let std = cmd.as_std();
         let args: Vec<_> = std.get_args().filter_map(OsStr::to_str).collect();
         let after = |flag: &str| {
@@ -336,8 +344,8 @@ mod tests {
                 .map(|i| args[i + 1])
                 .unwrap()
         };
-        assert_eq!(after("--tools"), READ_ONLY_TOOLS);
-        assert_eq!(after("--allowedTools"), READ_ONLY_TOOLS);
+        assert_eq!(after("--tools"), "Read,Grep,Skill");
+        assert_eq!(after("--allowedTools"), "Read,Grep,Skill");
         assert_eq!(after("--model"), "claude-sonnet-5");
         assert_eq!(after("--add-dir"), "/skills");
         assert!(args.contains(&"--restricted"));

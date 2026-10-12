@@ -3,8 +3,6 @@ source: crates/cli/src/tui/config/tests.rs
 expression: draw(&editor).backend()
 ---
 "┌ /home/u/.config/sanic-review/config.toml → /home/u/dotfiles/sanic. 3 unsaved ┐"
-"│ # the `claude` executable; a bare name is looked up on PATH                  │"
-"│ # claude = "claude"                                                (default) │"
 "│ # agent runs at once, across all PRs                                         │"
 "│ # max_concurrent = 2                                               (default) │"
 "│ # seconds before a run is killed                                             │"
@@ -12,6 +10,8 @@ expression: draw(&editor).backend()
 "│ # more directories the agent may read                                        │"
 "│ # read_paths = []                                                  (default) │"
 "│ # the review model; `auto` is your own Claude default                        │"
+"│ # model = "auto"                                                   (default) │"
+"│ # hold queued reviews until you start them                                   │"
 "│ ┌ Remove profile? ─────────────────────────────────────────────────────────┐ │"
 "│ │ Remove [profile.first] and everything in it?                             │ │"
 "│ │                                                                          │ │"

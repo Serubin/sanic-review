@@ -260,7 +260,7 @@ fn the_editor_says_what_manual_reviews_its_edits_leave() {
     };
     assert_eq!(editor.manual_reviews(), set);
     // Unset, the profile follows the runner's again.
-    select(&mut editor, 5, 5);
+    select(&mut editor, 5, 6);
     let _ = press(&mut editor, KeyCode::Char('u'));
     assert_eq!(editor.manual_reviews(), ManualReviews::runner(true));
 }
@@ -277,7 +277,7 @@ fn the_footer_offers_k_j_on_profiles_and_entries_after_the_other_keys() {
             .collect::<String>()
     };
     // `[profile.ring]`, then its one entry, the row after its keys.
-    for row in [0, 10] {
+    for row in [0, 11] {
         select(&mut editor, 5, row);
         // At 80 columns the keys it showed before come first, and `K/J`
         // is what gives way.
@@ -484,7 +484,7 @@ fn list_items_are_added_edited_moved_and_removed() {
 fn repo_entries_open_switch_kind_and_take_globs() {
     let mut editor = editor(CONFIG);
     // profile.ring's repos, after its name and eight keys.
-    select(&mut editor, 5, 10);
+    select(&mut editor, 5, 11);
     let _ = press(&mut editor, KeyCode::Enter);
     assert!(editor.entry.is_some());
     // github → checkout, which needs a path.
@@ -668,7 +668,7 @@ fn counts_show_what_the_config_watches_and_each_entrys_share() {
         "repos = [{ github = \"org\" }, { github = \"org/api\", paths = [\"v/**\"] }]",
     );
     let mut editor = editor(&text);
-    select(&mut editor, 5, 10);
+    select(&mut editor, 5, 11);
     let now = SystemTime::UNIX_EPOCH;
     let wanted = editor.want(now);
     insta::assert_snapshot!("counting", draw(&editor).backend());
@@ -813,7 +813,7 @@ fn entry_counts_follow_their_entry_and_skip_ones_not_yet_loaded() {
         "repos = [{ github = \"org\" }, { github = \"else/api\" }]",
     );
     let mut editor = editor(&text);
-    select(&mut editor, 5, 11);
+    select(&mut editor, 5, 12);
     let _ = editor.want(SystemTime::UNIX_EPOCH);
     let covers = |editor: &ConfigEditor, n| {
         editor
@@ -877,7 +877,7 @@ fn entries_on_one_checkout_through_two_remotes_keep_their_own_counts() {
     };
     let path = Path::new("/c/config.toml");
     editor.checked(generation, check::check(&text, path, &ByRemote));
-    select(&mut editor, 5, 11);
+    select(&mut editor, 5, 12);
     let _ = editor.want(SystemTime::UNIX_EPOCH);
     let scope = |n| {
         editor
@@ -932,7 +932,7 @@ fn f_on_repos_suggests_orgs_and_scans_for_checkouts() {
         Query::Orgs,
         Answer::Orgs(vec!["org".into(), "other".into()]),
     );
-    select(&mut editor, 5, 10);
+    select(&mut editor, 5, 11);
     let _ = press(&mut editor, KeyCode::Char('f'));
     let Some(Popup::Suggest(suggest)) = &editor.popup else {
         panic!("no suggestions");
@@ -1191,7 +1191,7 @@ fn finds_land_once_and_only_on_the_popup_that_asked() {
         Answer::Orgs(vec!["ORG".into(), "Other".into()]),
     );
     // A profile's repos: orgs you're in are matched without case.
-    select(&mut editor, 5, 10);
+    select(&mut editor, 5, 11);
     let _ = press(&mut editor, KeyCode::Char('f'));
     let Some(Popup::Suggest(suggest)) = &editor.popup else {
         panic!("no suggestions");

@@ -39,6 +39,12 @@ pub const DEFAULT_CLAUDE: &str = "claude";
 pub const DEFAULT_MAX_RUNS: usize = 2;
 pub const DEFAULT_RUN_TIMEOUT: Duration = Duration::from_mins(30);
 pub const DEFAULT_MANUAL_REVIEWS: bool = true;
+pub const DEFAULT_TOOLS: &[&str] = &["Read", "Grep", "Glob", "Agent", "Skill"];
+/// The Claude Code tools `tools` may name: none runs commands, writes files
+/// or reaches the network itself. Skill and Agent trust what they load: a
+/// skill can run shell commands as you, and subagents' file confinement
+/// isn't documented; see Tools under Runner in the design doc.
+pub const SAFE_TOOLS: &[&str] = &["Read", "Grep", "Glob", "Agent", "Skill", "TodoWrite"];
 /// The `model` value that leaves the choice to `claude`, which then uses your
 /// own default model at run time.
 /// Matched ignoring case; setup writes it lowercase.
@@ -47,6 +53,36 @@ pub const AUTO_MODEL: &str = "auto";
 #[must_use]
 pub fn is_auto_model(model: &str) -> bool {
     model.trim().eq_ignore_ascii_case(AUTO_MODEL)
+}
+
+/// Checks that each of `tools` is one of [`SAFE_TOOLS`], saying why one
+/// isn't.
+pub fn check_tools(tools: &[String]) -> Result<()> {
+    for tool in tools {
+        if SAFE_TOOLS.contains(&tool.as_str()) {
+            continue;
+        }
+        // `Bash(git *)` is still Bash.
+        let name = tool.split('(').next().unwrap_or_default().trim();
+        let why = match name {
+            "Bash" | "PowerShell" | "REPL" => {
+                "it runs commands, which `--restricted` doesn't confine, so it could read \
+                 `gh`'s stored token"
+            }
+            "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => {
+                "it writes files, and the agent is read-only"
+            }
+            "WebFetch" | "WebSearch" => "it reaches the network, and the agent has no network",
+            _ if SAFE_TOOLS.contains(&name) => "`tools` takes bare tool names, not patterns",
+            _ => match SAFE_TOOLS.iter().find(|t| t.eq_ignore_ascii_case(name)) {
+                Some(_) => "tool names are case-sensitive",
+                None => "it isn't one sanic-review knows to be safe",
+            },
+        };
+        return Err(eyre!("`{tool}` isn't allowed: {why}"))
+            .suggestion(format!("use some of {}", SAFE_TOOLS.join(", ")));
+    }
+    Ok(())
 }
 
 /// The version control system backing a local checkout.
@@ -229,6 +265,10 @@ pub struct Profile {
     /// The profile's own `model`, or else `runner.model`. `None` is
     /// [`AUTO_MODEL`]: `claude` gets no `--model`.
     pub model: Option<String>,
+    /// The tools its agent may use: the profile's own `tools`, or else
+    /// `runner.tools`, or else [`DEFAULT_TOOLS`]. Each is one of
+    /// [`SAFE_TOOLS`].
+    pub tools: Vec<String>,
     pub auto_fix: bool,
     /// Added to `review_requests.skip_titles` for PRs this profile matches.
     pub skip_titles: TitleFilter,
@@ -515,12 +555,12 @@ impl Config {
             .collect::<Result<_>>()
             .wrap_err("in `runner.read_paths`")?;
         // Folded into each profile, which is all a run reads.
-        let default_model = resolve_model(raw.runner.model, None).wrap_err("in `runner.model`")?;
+        let defaults = ProfileDefaults::new(raw.runner.model, raw.runner.tools)?;
         let profiles = raw
             .profile
             .into_iter()
             .map(|(name, p)| {
-                resolve_profile(&name, p, &paths, resolver, default_model.as_deref())
+                resolve_profile(&name, p, &paths, resolver, &defaults)
                     .wrap_err_with(|| format!("in profile `{name}`"))
             })
             .collect::<Result<_>>()?;
@@ -658,12 +698,28 @@ pub fn contract_path_in(path: &Path, home: Option<&Path>) -> String {
     }
 }
 
+/// What `[runner]` sets for profiles that don't set their own.
+struct ProfileDefaults {
+    model: Option<String>,
+    tools: Vec<String>,
+}
+
+impl ProfileDefaults {
+    fn new(model: Option<String>, tools: Option<Vec<String>>) -> Result<Self> {
+        let builtin: Vec<String> = DEFAULT_TOOLS.iter().map(|&t| t.into()).collect();
+        Ok(Self {
+            model: resolve_model(model, None).wrap_err("in `runner.model`")?,
+            tools: resolve_tools(tools, &builtin).wrap_err("in `runner.tools`")?,
+        })
+    }
+}
+
 fn resolve_profile(
     name: &str,
     raw: RawProfile,
     paths: &PathContext<'_>,
     resolver: &dyn CheckoutResolver,
-    default_model: Option<&str>,
+    defaults: &ProfileDefaults,
 ) -> Result<Profile> {
     if raw.repos.is_empty() {
         return Err(eyre!("`repos` is empty"))
@@ -685,7 +741,8 @@ fn resolve_profile(
         instructions: expand_all(&raw.instructions)?,
         procedure: expand_all(&raw.procedure)?,
         skills: expand_all(&raw.skills)?,
-        model: resolve_model(raw.model, default_model)?,
+        model: resolve_model(raw.model, defaults.model.as_deref())?,
+        tools: resolve_tools(raw.tools, &defaults.tools).wrap_err("in `tools`")?,
         auto_fix: raw.auto_fix,
         skip_titles: TitleFilter::new(raw.skip_titles).wrap_err("in `skip_titles`")?,
         authors: AuthorFilter::new(raw.authors).wrap_err("in `authors`")?,
@@ -693,6 +750,15 @@ fn resolve_profile(
         manual_reviews: raw.manual_reviews,
         targets,
     })
+}
+
+/// `default` when unset, after checking them; see [`check_tools`].
+fn resolve_tools(raw: Option<Vec<String>>, default: &[String]) -> Result<Vec<String>> {
+    let Some(tools) = raw else {
+        return Ok(default.to_vec());
+    };
+    check_tools(&tools)?;
+    Ok(tools)
 }
 
 /// `default` when unset. [`AUTO_MODEL`] resolves to `None`, even over a
@@ -830,6 +896,7 @@ struct RawRunner {
     read_paths: Vec<String>,
     model: Option<String>,
     manual_reviews: Option<bool>,
+    tools: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -868,6 +935,7 @@ struct RawProfile {
     #[serde(default)]
     skills: Vec<String>,
     model: Option<String>,
+    tools: Option<Vec<String>>,
     #[serde(default)]
     auto_fix: bool,
     #[serde(default)]
@@ -1302,6 +1370,63 @@ mod tests {
             unset.profiles[0].model, None,
             "unset leaves claude's default"
         );
+    }
+
+    #[test]
+    fn runner_tools_are_the_default_and_a_profiles_replace_them() {
+        let config = parse(
+            r#"
+            [runner]
+            tools = ["Read", "Grep"]
+            [profile.own]
+            tools = ["Read", "Skill"]
+            repos = [{ github = "a/b" }]
+            [profile.inherits]
+            repos = [{ github = "c/d" }]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.profiles[0].tools, ["Read", "Skill"]);
+        assert_eq!(config.profiles[1].tools, ["Read", "Grep"]);
+        let unset = parse("[profile.p]\nrepos = [{ github = \"a/b\" }]").unwrap();
+        assert_eq!(unset.profiles[0].tools, DEFAULT_TOOLS);
+    }
+
+    #[test]
+    fn tools_that_run_commands_write_or_reach_the_network_are_errors() {
+        for (tool, why) in [
+            ("Bash", "`gh`'s stored token"),
+            ("Bash(git log *)", "`gh`'s stored token"),
+            ("Write", "read-only"),
+            ("Edit", "read-only"),
+            ("NotebookEdit", "read-only"),
+            ("WebFetch", "no network"),
+            ("WebSearch", "no network"),
+            ("read", "case-sensitive"),
+            ("Read(./src/**)", "not patterns"),
+            ("mcp__github__create_review", "knows to be safe"),
+            ("default", "knows to be safe"),
+        ] {
+            for table in ["[runner]", "[profile.p]"] {
+                let text = format!(
+                    "{table}\ntools = [\"Read\", {tool:?}]\n\
+                     [profile.q]\nrepos = [{{ github = \"a/b\" }}]\n"
+                );
+                let text = text.replace(
+                    "[profile.p]\ntools",
+                    "[profile.p]\nrepos = [{ github = \"c/d\" }]\ntools",
+                );
+                let err = format!("{:?}", parse(&text).unwrap_err());
+                assert!(err.contains(&format!("`{tool}` isn't allowed")), "{err}");
+                assert!(err.contains(why), "{tool}: {err}");
+                let key = if table == "[runner]" {
+                    "`runner.tools`"
+                } else {
+                    "`tools`"
+                };
+                assert!(err.contains(key), "{err}");
+            }
+        }
     }
 
     #[test]

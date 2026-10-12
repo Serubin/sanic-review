@@ -37,6 +37,7 @@ pub struct AgentProfile {
     pub procedure: Vec<PathBuf>,
     pub skills: Vec<PathBuf>,
     pub model: Option<String>,
+    pub tools: Vec<String>,
 }
 
 impl From<&Profile> for AgentProfile {
@@ -46,6 +47,7 @@ impl From<&Profile> for AgentProfile {
             procedure: profile.procedure.clone(),
             skills: profile.skills.clone(),
             model: profile.model.clone(),
+            tools: profile.tools.clone(),
         }
     }
 }
@@ -202,6 +204,7 @@ impl ReviewRunner {
             session_id: session_id.to_owned(),
             cwd: self.worktree_path(run),
             add_dirs: self.chat_dirs(run, settings),
+            tools: settings.profile.tools.clone(),
             allow_edits,
         }
     }
@@ -293,6 +296,7 @@ impl ReviewRunner {
             .run(&Invocation {
                 cwd: worktree.path(),
                 add_dirs: &add_dirs,
+                tools: &profile.tools,
                 prompt: &brief,
                 system_prompt: &system_prompt,
                 schema: &schema,
@@ -343,6 +347,7 @@ async fn system_prompt(profile: &AgentProfile, references: &[&Path]) -> Result<S
     }
     let skills: Vec<&Path> = profile.skills.iter().map(PathBuf::as_path).collect();
     Ok(prompt::system_prompt(
+        &profile.tools,
         &instructions,
         &procedure,
         &skills,

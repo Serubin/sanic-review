@@ -146,6 +146,7 @@ fn profile(instructions: Vec<PathBuf>) -> AgentProfile {
         procedure: vec![],
         skills: vec![],
         model: Some("claude-sonnet-5".into()),
+        tools: ["Read", "Grep", "Glob"].map(String::from).into(),
     }
 }
 

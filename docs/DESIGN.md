@@ -92,12 +92,14 @@ sessions by directory, so the run's worktree is checked out again at its
 original path, `worktrees/<run id>` in the data dir, at the run's head, and
 `claude --resume` runs there in the foreground. A resumed session doesn't
 keep its system prompt, so the chat's says it's a chat with the reviewer,
-who can answer now, that it still can't post, run `gh` or reach the
+who can answer now, that it still mustn't post, run `gh` or reach the
 network, and that drafts change only on the dashboard. It keeps the review's
 limits: `--restricted` and `--strict-mcp-config` (the PR's own
-`.claude/settings.json` and `.mcp.json` don't load), the read-only tools,
-the run's `--add-dir`s, and no GitHub token. `--allow-edits` adds Edit and
-Write and drops the `--add-dir`s, so only the worktree can change. The
+`.claude/settings.json` and `.mcp.json` don't load), the profile's tools,
+the run's `--add-dir`s, and no GitHub token. `--allow-edits` gives the
+file-reading tools plus Edit and Write, whatever the profile's tools, so
+no skill or subagent runs beside edits, and drops the `--add-dir`s, so
+only the worktree can change. The
 worktree is removed when the chat ends, however it ends; it's refused while
 that path exists (a running review or another chat). `--print-command`
 prints the `cd <worktree> && …` line instead and leaves the worktree for it
@@ -184,6 +186,7 @@ skip_titles = ["build(deps)*"]         # never auto-review PRs with these titles
 # read_paths = ["~/src/shared-lib"]    # extra dirs the agent may read
 # model = "auto"                       # default model; see Model below
 # manual_reviews = true                # hold queued reviews until you start them
+# tools = ["Read", "Grep", "Glob"]   # narrower than the default; see Tools
 
 [tui]
 # keys = "emacs"                       # or "vi", for text fields; unset, guessed
@@ -483,9 +486,10 @@ it `superseded`.
    and output format; where the agent runs; the profile's instruction files;
    its procedure; its skill dirs; the reference checkouts. Where it runs
    comes before anything the profile supplies, since review skills are
-   usually written for an interactive session: it says the agent runs non-interactively,
-   with read-only tools, and can't ask, wait for confirmation, post, run
-   `gh` or write files; that its only output is the drafts, which you
+   usually written for an interactive session: it says the agent runs
+   non-interactively, names the run's tools, says it can't ask or wait for
+   confirmation and mustn't post, run `gh` or write files by any means, a
+   skill's included; that its only output is the drafts, which you
    triage, edit and post from the dashboard; and how to map interactive
    steps. Presenting for triage or explaining to the user goes in each
    draft's private note, your revision requests arrive in a later prompt,
@@ -542,14 +546,17 @@ it `superseded`.
    regeneration's session saw what its source's did.
 3. **Invoke.** Headless `claude -p` with JSON output against a schema,
    `--append-system-prompt` for instructions, and skill dirs from the profile.
-   Only read-only tools are allowed (Read, Grep, Glob, and read-only Bash if
-   required). There's no network access and no `gh`, and the environment has
-   no GitHub token.
+   Only the profile's tools are allowed (see Tools below), none of which
+   writes files, runs commands or reaches the network itself. There's no
+   `gh`, and the environment has no GitHub token.
    Concretely: the brief goes on stdin, the schema via `--json-schema`, and
    output is `stream-json` so the whole session is kept as the transcript.
-   `--tools Read,Grep,Glob` removes every other tool, `--restricted`
-   confines file access to the worktree and `--add-dir`s (so the agent can't
-   read `gh`'s stored token), and `--strict-mcp-config` loads no MCP servers.
+   `--tools` with the profile's tools removes every other built-in tool,
+   and `--allowedTools` with the same list lets them run unprompted.
+   `--restricted` confines the built-in file tools to the worktree and
+   `--add-dir`s (so Read can't reach `gh`'s stored token), and
+   `--strict-mcp-config` loads no MCP servers. Skill and Agent widen this;
+   see Tools below.
    Skill dirs are passed as `--add-dir`s and listed in the system prompt, so
    the agent reads their `SKILL.md` files directly. Procedure dirs are
    `--add-dir`s too, so the agent can read files a `SKILL.md` refers to
@@ -709,6 +716,52 @@ and `serve` and the other runs carry on.
 
 A global semaphore bounds concurrency. The per-profile model setting controls
 cost.
+
+**Tools.** `runner.tools` lists the Claude Code tools a review, a
+regeneration or a chat may use; unset, it's the file-reading tools plus
+Agent and Skill (`DEFAULT_TOOLS`). A profile's `tools` replaces it for
+that profile's runs; the lists aren't merged. The system prompt names
+the run's tools. Only tools from a fixed set (`SAFE_TOOLS`) are
+accepted: ones that don't write, run commands or reach the network
+themselves, by bare name. Anything else, at load, on reload or in the
+config editor, is an error saying why: `Bash` and the other command
+tools aren't confined by `--restricted`, so they could read `gh`'s stored
+token; the write tools break the read-only rule; the web tools break the
+no-network rule; a pattern such as `Read(./src/**)` isn't a bare name;
+and any other name, an MCP tool's or a miscased one, isn't one
+sanic-review knows to be safe. An empty list passes `--tools ""`, which
+Claude Code documents as no tools. A chat with `--allow-edits` ignores
+them; see `sanic-review chat` under Process model.
+
+Skill and Agent trust what they load. They're allowed by default because
+sanic-review trusts your skills, and with them the PR author's:
+- **Skill** runs any skill Claude Code finds: yours under
+  `~/.claude/skills`, plugin skills, and the `.claude/skills` of the
+  worktree and of each `--add-dir`. The worktree's are the PR's, written
+  by its author, and an `--add-dir` checkout's are whatever its checked
+  out branch holds. A skill can run shell commands while it loads (its
+  ``!`cmd` `` lines). Claude Code runs those as you, outside `--tools`,
+  and `--restricted` isn't documented to stop them, so such a command can
+  read anything you can, `gh`'s stored token included. A skill's
+  `allowed-tools` only pre-approves tools; it adds none.
+- **Agent** starts subagents, the PR's own `.claude/agents` and each
+  `--add-dir`'s among them. Claude Code documents that they inherit the
+  session's tools, narrowed by their own definition, and its permission
+  rules. It doesn't say whether they keep `--restricted`'s confinement of
+  the file tools to the worktree and `--add-dir`s. A skill set to run in
+  a forked context runs as a subagent too.
+
+To narrow this, drop `Skill`, `Agent` or both from `runner.tools` or a
+profile's `tools`; `procedure` still works without them, since it's
+inlined, and so do `skills`, which the agent reads with Read. Listing
+only directories you trust as `procedure`, `skills`, `read_paths` or
+checkouts narrows what your own config adds, but not the PR's own
+`.claude`. Claude Code also has switches sanic-review doesn't pass
+today: the `disableSkillShellExecution` setting replaces skill shell
+commands with a notice (`--restricted` still reads `--settings`, though
+that hasn't been checked against a live run), and
+`--disable-slash-commands` or `--safe-mode` turn skills off altogether,
+yours included.
 
 **Model.** A profile's `model` overrides `runner.model`, which applies to
 profiles without one. `"auto"` passes no `--model`, so `claude` uses your own
@@ -1726,7 +1779,14 @@ checkout's `.workspaces/`, never in your working copy. If the checkout has
 
 - PR content is untrusted and may contain prompt injection. The mitigation is
   capability-based: the agent can't post, push or reach the network, so the
-  worst it can do is write a bad draft that you then read.
+  worst it can do is write a bad draft that you then read. That holds as
+  far as its skills are trustworthy, and by default sanic-review trusts
+  them: with `Skill` in its tools, a skill's shell commands run as you,
+  outside `--tools` and, as far as Claude Code documents, `--restricted`,
+  and the PR's own `.claude/skills` and `.claude/agents`, and those of
+  each `--add-dir` checkout, load with yours. Whether subagents keep
+  `--restricted`'s file confinement isn't documented either. Tools under
+  Runner says how to narrow both.
 - The GitHub token lives only in the serve process, and only the web task's
   submit path writes with it: reviews, their replies and 👍s.
 - Every agent, whether a review, a regeneration or a chat, runs without

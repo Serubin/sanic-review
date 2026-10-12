@@ -527,7 +527,8 @@ async fn chat_resumes_the_session_in_the_reviews_worktree() {
         "{args:?}"
     );
     assert!(
-        args.windows(2).any(|a| a == ["--tools", "Read,Grep,Glob"]),
+        args.windows(2)
+            .any(|a| a == ["--tools", "Read,Grep,Glob,Agent,Skill"]),
         "{args:?}"
     );
     assert!(!args.contains(&"-p"), "{args:?}");

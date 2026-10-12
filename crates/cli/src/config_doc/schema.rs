@@ -4,8 +4,8 @@
 use sanic_core::config::{
     AUTO_MODEL, DEFAULT_API_URL, DEFAULT_AUTHORS, DEFAULT_CLAUDE, DEFAULT_GIT_URL,
     DEFAULT_MANUAL_REVIEWS, DEFAULT_MAX_RUNS, DEFAULT_MIN_NOTIFICATION_POLL, DEFAULT_QUIET,
-    DEFAULT_RECONCILE, DEFAULT_RUN_TIMEOUT, DEFAULT_SKIP_DRAFTS, DEFAULT_TEAMS,
-    DEFAULT_UPDATED_WITHIN_DAYS,
+    DEFAULT_RECONCILE, DEFAULT_RUN_TIMEOUT, DEFAULT_SKIP_DRAFTS, DEFAULT_TEAMS, DEFAULT_TOOLS,
+    DEFAULT_UPDATED_WITHIN_DAYS, SAFE_TOOLS,
 };
 
 use super::Table;
@@ -180,6 +180,13 @@ pub const RUNNER: &[Field] = &[
         Fallback::Value(|| DEFAULT_MANUAL_REVIEWS.to_string()),
         "hold queued reviews until you start them",
     ),
+    Field::new(
+        "tools",
+        Kind::List,
+        Fallback::Value(|| format!("{DEFAULT_TOOLS:?}")),
+        "the agent's tools; none that write, run commands or reach the network",
+    )
+    .choices(SAFE_TOOLS),
 ];
 
 pub const TUI: &[Field] = &[Field::new(
@@ -218,6 +225,13 @@ pub const PROFILE: &[Field] = &[
         Fallback::Inherits(Table::Runner, "model"),
         "the review model for this profile's PRs",
     ),
+    Field::new(
+        "tools",
+        Kind::List,
+        Fallback::Inherits(Table::Runner, "tools"),
+        "replaces `runner.tools` for this profile's PRs",
+    )
+    .choices(SAFE_TOOLS),
     Field::new(
         "manual_reviews",
         Kind::Bool,

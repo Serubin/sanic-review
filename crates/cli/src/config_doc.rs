@@ -1240,7 +1240,10 @@ repos = [{ github = "org" }]
         for table in Table::SECTIONS.into_iter().chain([profile("p")]) {
             writeln!(text, "[{table}]").unwrap();
             for field in table.fields() {
-                let choice = field.choices.first().map(|c| format!("{c:?}"));
+                let choice = field.choices.first().map(|c| match field.kind {
+                    Kind::List => format!("[{c:?}]"),
+                    _ => format!("{c:?}"),
+                });
                 let value = match (field.name, field.kind) {
                     _ if choice.is_some() => choice.as_deref().unwrap(),
                     ("model", _) => "\"auto\"",
@@ -1256,13 +1259,20 @@ repos = [{ github = "org" }]
         Config::parse(&text, Path::new("/"), &NoCheckouts).unwrap();
         assert_eq!(Key::new(Table::Runner, "bogus"), None);
         // Each choice loads, and only those do.
-        for table in Table::SECTIONS {
+        for table in Table::SECTIONS.into_iter().chain([profile("p")]) {
             for field in table.fields().iter().filter(|f| !f.choices.is_empty()) {
                 for choice in field.choices.iter().chain(&["bogus"]) {
-                    let text = format!(
-                        "[{table}]\n{} = {choice:?}\n[profile.p]\nrepos = [{{ github = \"org\" }}]\n",
-                        field.name
-                    );
+                    let value = match field.kind {
+                        Kind::List => format!("[{choice:?}]"),
+                        _ => format!("{choice:?}"),
+                    };
+                    let set = format!("{} = {value}\n", field.name);
+                    let (here, profile) = match table {
+                        Table::Profile(_) => (String::new(), set),
+                        _ => (format!("[{table}]\n{set}"), String::new()),
+                    };
+                    let text =
+                        format!("{here}[profile.p]\nrepos = [{{ github = \"org\" }}]\n{profile}");
                     let loads = Config::parse(&text, Path::new("/"), &NoCheckouts).is_ok();
                     assert_eq!(loads, *choice != "bogus", "{text}");
                 }

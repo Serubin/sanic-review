@@ -41,12 +41,19 @@ As implemented, not as hoped:
   GitHub is the dashboard's submit path, and it shows you every request it
   will send, with its exact body, before you confirm.
 - **Agents get read-only tools and no GitHub credentials.** Reviews run
-  `claude -p` with only Read, Grep and Glob, `--restricted` to the checkout
-  and the directories you configure, and no MCP servers. Environment
-  variables that look like GitHub tokens are removed before it starts. PR
-  text is fenced as data in the prompt, but prompt injection is still
-  possible; the mitigation is that the worst the agent can do is write a bad
-  draft, which you then read.
+  `claude -p` with only the file-reading tools plus Agent and Skill
+  (`runner.tools` narrows that; tools that write, run commands or reach
+  the network are refused), `--restricted` to the checkout and the directories you
+  configure, and no MCP servers. Environment variables that look like
+  GitHub tokens are removed before it starts. PR text is fenced as data in
+  the prompt, but prompt injection is still possible; the mitigation is
+  that the worst the agent can do is write a bad draft, which you then
+  read.
+- **Skills run as you.** A skill's shell commands run outside those
+  limits, and the PR's own `.claude/skills` and `.claude/agents` load
+  with yours. Drop `Skill` and `Agent` from `runner.tools` unless you
+  trust every skill the agent can find; see Tools in
+  [docs/DESIGN.md](docs/DESIGN.md#runner).
 - **The agent can read what you let it read.** That includes the local
   checkouts in your config and their untracked files (`.env`, say). A
   poisoned PR could get it to quote one into a draft. Read drafts before
