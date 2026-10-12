@@ -28,8 +28,8 @@ pub struct ChatCommand {
     /// The run's worktree, which must be where the review ran: Claude Code
     /// keys sessions by directory.
     pub cwd: PathBuf,
-    /// The run's other directories: its run dir, skills and reference
-    /// checkouts.
+    /// The run's other directories: its run dir, procedure, skills and
+    /// reference checkouts.
     pub add_dirs: Vec<PathBuf>,
     /// Adds Edit and Write. Only the worktree is given then, so nothing
     /// outside it can be edited.

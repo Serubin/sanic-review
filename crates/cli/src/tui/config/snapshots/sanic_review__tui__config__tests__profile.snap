@@ -3,8 +3,6 @@ source: crates/cli/src/tui/config/tests.rs
 expression: draw(&editor).backend()
 ---
 "┌ /home/u/.config/sanic-review/config.toml → /home/u/dotfiles/sanic.toml ──────┐"
-"│ # seconds before a run is killed                                             │"
-"│ # timeout_secs = 1800                                              (default) │"
 "│ # more directories the agent may read                                        │"
 "│ # read_paths = []                                                  (default) │"
 "│ # the review model; `auto` is your own Claude default                        │"
@@ -19,6 +17,8 @@ expression: draw(&editor).backend()
 "│ [profile.ring]                                                               │"
 "│ # files whose text goes in the agent's system prompt                         │"
 "│ # instructions = []                                                (default) │"
+"│ # skill directories whose `SKILL.md` the agent follows to review             │"
+"│ # procedure = []                                                   (default) │"
 "│ # skill directories the agent may read                                       │"
 "│ # skills = []                                                      (default) │"
 "│ What this config does ───────────────────────────────────────────────────────│"

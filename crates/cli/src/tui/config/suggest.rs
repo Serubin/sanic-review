@@ -14,10 +14,12 @@ pub enum Find {
     /// Checkouts under `root`, as typed, at most `depth` directories down.
     Checkouts { root: String, depth: usize },
     /// A profile's skills and instruction files: what its `entries`
-    /// check out, less the `skills` and `instructions` it has, as written.
+    /// check out, less the `procedure`, `skills` and `instructions` it
+    /// has, as written.
     Extras {
         profile: String,
         entries: Vec<RepoEntry>,
+        procedure: Vec<String>,
         skills: Vec<String>,
         instructions: Vec<String>,
     },
@@ -29,6 +31,8 @@ pub enum Found {
     Checkouts(Vec<scan::Found>),
     Extras {
         profile: String,
+        /// Skills for `procedure`, less those it has.
+        procedure: Vec<Skill>,
         skills: Vec<Skill>,
         instructions: Vec<PathBuf>,
     },
@@ -54,6 +58,7 @@ pub enum What {
     Teams { patterns: Vec<String> },
     Repos { profile: String },
     Model { key: Key },
+    Procedure { profile: String },
     Skills { profile: String },
     Instructions { profile: String },
 }
@@ -173,11 +178,13 @@ impl Suggest {
                     _ => None,
                 })
                 .collect(),
-            What::Skills { profile } | What::Instructions { profile } => {
-                let name = if matches!(self.what, What::Skills { .. }) {
-                    "skills"
-                } else {
-                    "instructions"
+            What::Procedure { profile }
+            | What::Skills { profile }
+            | What::Instructions { profile } => {
+                let name = match self.what {
+                    What::Procedure { .. } => "procedure",
+                    What::Skills { .. } => "skills",
+                    _ => "instructions",
                 };
                 let Some(key) = Key::new(Table::Profile(profile.clone()), name) else {
                     return Vec::new();

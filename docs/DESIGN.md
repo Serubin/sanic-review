@@ -194,6 +194,7 @@ skip_titles = ["build(deps)*"]         # never auto-review PRs with these titles
 # moves profiles and their entries.
 [profile.default]
 instructions = ["~/.config/sanic-review/instructions/general.md"]
+procedure = []                         # skill dirs whose SKILL.md it follows
 skills = []                            # skill dirs made available to the agent
 model = "claude-sonnet-5"
 skip_titles = ["wip*"]                 # added to review_requests.skip_titles
@@ -204,6 +205,7 @@ repos = [{ github = "my-org" }]
 
 [profile.ring]
 instructions = ["~/.config/sanic-review/instructions/ring.md"]
+procedure = ["~/github/services/documentation/.claude/skills/review"]
 skills = ["~/github/services/documentation/.claude/skills"]
 repos = [
   "~/github/sanic-cli",
@@ -479,9 +481,9 @@ it `superseded`.
    instructions.
    The system prompt is, in order: sanic-review's own review instructions
    and output format; where the agent runs; the profile's instruction files;
-   its skill dirs; the reference checkouts. Where it runs comes before
-   anything the profile supplies, since review skills are usually written
-   for an interactive session: it says the agent runs non-interactively,
+   its procedure; its skill dirs; the reference checkouts. Where it runs
+   comes before anything the profile supplies, since review skills are
+   usually written for an interactive session: it says the agent runs non-interactively,
    with read-only tools, and can't ask, wait for confirmation, post, run
    `gh` or write files; that its only output is the drafts, which you
    triage, edit and post from the dashboard; and how to map interactive
@@ -489,8 +491,17 @@ it `superseded`.
    draft's private note, your revision requests arrive in a later prompt,
    delivering, posting or confirming stops at the drafts, and steps that
    need tools it lacks are skipped without being reported as failures.
-   Otherwise the profile's instructions govern style and content. A
-   regeneration gets the same system prompt.
+   Otherwise the profile's instructions govern style and content.
+   The procedure is each `procedure` dir's `SKILL.md`, inlined whole, as
+   the steps the agent follows for this review, where `skills` are only
+   listed for it to read as it sees fit. It follows the instruction files,
+   so it's read with them in mind, and a short preamble adapts it: the
+   worktree is already at the PR head and the brief has the PR, so steps
+   that fetch or view the PR are done; a step that hands finding problems
+   to a skill, command or agent the agent can't run, it does itself; and
+   the mapping above applies to the rest. A dir without a `SKILL.md`
+   fails the run, as a missing instruction file does. A regeneration gets
+   the same system prompt.
    The metadata includes the PR's title and description. Each piece of
    PR-authored text is fenced with more backticks than it contains, so it
    can't close its own block.
@@ -540,7 +551,9 @@ it `superseded`.
    confines file access to the worktree and `--add-dir`s (so the agent can't
    read `gh`'s stored token), and `--strict-mcp-config` loads no MCP servers.
    Skill dirs are passed as `--add-dir`s and listed in the system prompt, so
-   the agent reads their `SKILL.md` files directly. A run that outlives
+   the agent reads their `SKILL.md` files directly. Procedure dirs are
+   `--add-dir`s too, so the agent can read files a `SKILL.md` refers to
+   beside it. A run that outlives
    `runner.timeout_secs` is killed and fails. The agent runs in its own
    process group, and whenever it stops, finished or killed, the whole
    group is killed, so nothing it started outlives it.
@@ -1570,23 +1583,25 @@ fonttools (run through `uv`, which only this task needs) to
     owners; what any profile already watches isn't offered;
   - on a `model`, `auto`, the aliases and the models your Claude settings
     and environment name;
-  - on a profile's `skills` and `instructions`, the skills and instruction
-    files in its checkouts (a path-scoped one's globbed directories
-    first) and your own skills, less what it lists already.
+  - on a profile's `procedure`, `skills` and `instructions`, the skills
+    and instruction files in its checkouts (a path-scoped one's globbed
+    directories first) and your own skills, less what that key lists
+    already.
   Space picks, Enter adds what's picked. Scans and searches of the disk
   run off the UI thread.
   As a field's typed, a dropdown under it lists what it could hold,
   going on from what's typed: those starting with it first, then those
   with it anywhere, ignoring case. It draws from what the editor has
-  already, so typing asks GitHub nothing: a path key's files (skills,
-  instructions, `read_paths`, `runner.claude`, a checkout, the scan's
+  already, so typing asks GitHub nothing: a path key's files (procedure,
+  skills, instructions, `read_paths`, `runner.claude`, a checkout, the scan's
   directory), listed from the disk once something's typed, a directory
   with a `/`; the models `f` lists; for `teams`, your teams as counted,
   `!` kept when typed; for a `github` entry, your orgs and your teams'
   orgs that no profile watches already, and the repos counted so far; a
   key's few values, as `tui.keys`'s; and a profile's skills and
-  instruction files, found as `f` finds them the first time either is
-  typed into, and again after an edit. It opens
+  instruction files, found as `f` finds them the first time its
+  `procedure`, `skills` or `instructions` is typed into, and again after
+  an edit. It opens
   once there are options and follows new answers as they come in. ↑ and
   ↓ choose, round from either end; Tab takes the chosen one, or else the
   first, and Enter takes the chosen one but sets what's typed while none

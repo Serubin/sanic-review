@@ -30,6 +30,7 @@ use sanic_core::{
 
 pub use self::check::{Checked, Checker};
 use self::counts::{Answer, Counted, Plan, Query, Showing, Stopped, Tally, Watched};
+use self::discover::skills::Skill;
 use self::field::{TextField, Took};
 use self::menu::{Menu, matching};
 use self::rows::{
@@ -107,6 +108,7 @@ pub enum Check {
 /// them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Extras {
+    procedure: Vec<String>,
     skills: Vec<String>,
     instructions: Vec<String>,
 }
@@ -330,12 +332,14 @@ impl ConfigEditor {
     pub fn found(&mut self, found: Found) {
         if let Found::Extras {
             profile,
+            procedure,
             skills,
             instructions,
         } = &found
             && self.extras.get(profile) == Some(&None)
         {
             let extras = Extras {
+                procedure: procedure.iter().map(|s| contract_path(&s.dir)).collect(),
                 skills: skills.iter().map(|s| contract_path(&s.dir)).collect(),
                 instructions: instructions.iter().map(|p| contract_path(p)).collect(),
             };
@@ -355,7 +359,9 @@ impl ConfigEditor {
                 (Found::Checkouts(_), What::Repos { .. }) | (Found::Failed(_), _) => true,
                 (
                     Found::Extras { profile, .. },
-                    What::Skills { profile: for_ } | What::Instructions { profile: for_ },
+                    What::Procedure { profile: for_ }
+                    | What::Skills { profile: for_ }
+                    | What::Instructions { profile: for_ },
                 ) => profile == for_,
                 _ => false,
             };
@@ -392,25 +398,13 @@ impl ConfigEditor {
                 }
             }
             Found::Extras {
+                procedure,
                 skills,
                 instructions,
                 ..
             } => match &suggest.what {
-                What::Skills { .. } => {
-                    suggest.rows = skills
-                        .into_iter()
-                        .map(|skill| Suggestion {
-                            label: skill.name,
-                            detail: format!(
-                                "{}  {}",
-                                skill.description.unwrap_or_default(),
-                                contract_path(&skill.dir)
-                            ),
-                            on: false,
-                            apply: Apply::Item(contract_path(&skill.dir)),
-                        })
-                        .collect();
-                }
+                What::Procedure { .. } => suggest.rows = skill_rows(procedure),
+                What::Skills { .. } => suggest.rows = skill_rows(skills),
                 _ => {
                     suggest.rows = instructions
                         .into_iter()
@@ -440,6 +434,7 @@ impl ConfigEditor {
                 .into_iter()
                 .filter_map(Result::ok)
                 .collect(),
+            procedure: listed("procedure"),
             skills: listed("skills"),
             instructions: listed("instructions"),
             profile,
@@ -459,7 +454,9 @@ impl ConfigEditor {
         let Table::Profile(profile) = &key.table else {
             return None;
         };
-        if !matches!(key.name, "skills" | "instructions") || self.extras.contains_key(profile) {
+        if !matches!(key.name, "procedure" | "skills" | "instructions")
+            || self.extras.contains_key(profile)
+        {
             return None;
         }
         let profile = profile.clone();
@@ -524,18 +521,20 @@ impl ConfigEditor {
                     rows,
                 ))));
             }
-            (_, Some(key)) if matches!(key.name, "skills" | "instructions") => {
+            (_, Some(key)) if matches!(key.name, "procedure" | "skills" | "instructions") => {
                 let Table::Profile(profile) = key.table.clone() else {
                     return Outcome::Open;
                 };
-                let what = if key.name == "skills" {
-                    What::Skills {
+                let what = match key.name {
+                    "procedure" => What::Procedure {
                         profile: profile.clone(),
-                    }
-                } else {
-                    What::Instructions {
+                    },
+                    "skills" => What::Skills {
                         profile: profile.clone(),
-                    }
+                    },
+                    _ => What::Instructions {
+                        profile: profile.clone(),
+                    },
                 };
                 let mut suggest = Suggest::new(what, Vec::new());
                 suggest.finding = true;
@@ -544,7 +543,8 @@ impl ConfigEditor {
             }
             _ => {
                 self.notice = Some(
-                    "f suggests teams, repos, models, skills and instructions for those keys"
+                    "f suggests teams, repos, models, procedure, skills and instructions for \
+                     those keys"
                         .into(),
                 );
             }
@@ -979,14 +979,14 @@ impl ConfigEditor {
                     .map(|team| format!("{not}{team}"))
                     .collect();
             }
-            (Some(key), _) if matches!(key.name, "skills" | "instructions") => {
+            (Some(key), _) if matches!(key.name, "procedure" | "skills" | "instructions") => {
                 if let Table::Profile(profile) = &key.table
                     && let Some(Some(found)) = self.extras.get(profile)
                 {
-                    let found = if key.name == "skills" {
-                        &found.skills
-                    } else {
-                        &found.instructions
+                    let found = match key.name {
+                        "procedure" => &found.procedure,
+                        "skills" => &found.skills,
+                        _ => &found.instructions,
                     };
                     // A find that raced an edit may name what's listed now.
                     let listed = items(&self.doc, key);
@@ -1687,6 +1687,23 @@ fn present_entries(doc: &ConfigDoc, path: &Path) -> Present {
         }
     }
     present
+}
+
+/// `f`'s rows for skills to add.
+fn skill_rows(skills: Vec<Skill>) -> Vec<Suggestion> {
+    skills
+        .into_iter()
+        .map(|skill| Suggestion {
+            label: skill.name,
+            detail: format!(
+                "{}  {}",
+                skill.description.unwrap_or_default(),
+                contract_path(&skill.dir)
+            ),
+            on: false,
+            apply: Apply::Item(contract_path(&skill.dir)),
+        })
+        .collect()
 }
 
 fn org_row(org: &str, why: &str) -> Suggestion {

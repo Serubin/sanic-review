@@ -222,6 +222,9 @@ impl Keys {
 pub struct Profile {
     pub name: String,
     pub instructions: Vec<PathBuf>,
+    /// Skill directories whose `SKILL.md` the agent follows as its review
+    /// procedure, each inlined in the system prompt.
+    pub procedure: Vec<PathBuf>,
     pub skills: Vec<PathBuf>,
     /// The profile's own `model`, or else `runner.model`. `None` is
     /// [`AUTO_MODEL`]: `claude` gets no `--model`.
@@ -680,6 +683,7 @@ fn resolve_profile(
     Ok(Profile {
         name: name.into(),
         instructions: expand_all(&raw.instructions)?,
+        procedure: expand_all(&raw.procedure)?,
         skills: expand_all(&raw.skills)?,
         model: resolve_model(raw.model, default_model)?,
         auto_fix: raw.auto_fix,
@@ -860,6 +864,8 @@ struct RawProfile {
     #[serde(default)]
     instructions: Vec<String>,
     #[serde(default)]
+    procedure: Vec<String>,
+    #[serde(default)]
     skills: Vec<String>,
     model: Option<String>,
     #[serde(default)]
@@ -935,6 +941,7 @@ mod tests {
 
         [profile.ring]
         model = "claude-sonnet-5"
+        procedure = ["skills/triage"]
         auto_fix = true
         repos = [
           "sanic-cli",
@@ -951,6 +958,7 @@ mod tests {
 
         let ring = &config.profiles[1];
         assert!(ring.auto_fix);
+        assert_eq!(ring.procedure, [Path::new("/base/skills/triage")]);
         assert_eq!(ring.targets.len(), 2);
         assert_eq!(
             ring.targets[0].checkout,

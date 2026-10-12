@@ -78,8 +78,8 @@ You can't ask questions, wait for confirmation, post to GitHub, run `gh` or \
 write files. Your only output is the drafts, in the format above; the reviewer \
 triages, edits and posts them from sanic-review's dashboard.
 
-The instructions and skills below may be written for an interactive session. \
-Map their steps onto this one:
+The instructions, procedure and skills below may be written for an interactive \
+session. Map their steps onto this one:
 - Presenting findings for triage, or explaining them to the user: put that in \
 each draft's private `note` (`summary_note` for the summary).
 - Revising from the user's verdicts: the reviewer's revision requests, for the \
@@ -88,8 +88,27 @@ whole review or one draft, arrive later, in a prompt that resumes this session.
 - Steps that need tools you don't have: skip them silently. They aren't \
 failures; don't report them.
 
-Otherwise, the instructions and skills below govern the review's style and \
-content.
+Otherwise, the instructions, procedure and skills below govern the review's \
+style and content.
+";
+
+/// Introduces the profile's procedure: skills written to be run by hand,
+/// which assume a session that starts from nothing and can call others.
+const PROCEDURE: &str = "
+# Procedure
+
+Follow the procedure below for this review. Where it assumes more than you \
+have:
+- The working directory is already a checkout of the PR head, and the user \
+message has its metadata, threads and diff: steps that fetch, check out or \
+view the PR are done.
+- Steps that hand finding problems to a skill, command or agent you can't \
+run: do that finding yourself.
+- The mapping under \"Where you're running\" applies to the rest: presenting \
+goes in private notes, delivering or posting stops at the drafts, and so on.
+
+Files a procedure refers to beside its `SKILL.md` are in its directory, which \
+you can read.
 ";
 
 /// What a chat resumed from a review's session is told about where it
@@ -106,11 +125,13 @@ points the reviewer made, some first drafted by you: never agree with them or cr
 them as if someone else had made them.";
 
 /// The system prompt: fixed review instructions and where the agent runs,
-/// then each of the profile's instruction files, then where its skills and
-/// the reference checkouts are.
+/// then each of the profile's instruction files, then its procedure, each
+/// `SKILL.md` as `(path, text)`, then where its skills and the reference
+/// checkouts are.
 #[must_use]
 pub fn system_prompt(
     instructions: &[(String, String)],
+    procedure: &[(String, String)],
     skills: &[&Path],
     references: &[&Path],
 ) -> String {
@@ -118,6 +139,12 @@ pub fn system_prompt(
     out.push_str(ENVIRONMENT);
     for (name, text) in instructions {
         let _ = write!(out, "\n# Instructions from {name}\n\n{}\n", text.trim_end());
+    }
+    if !procedure.is_empty() {
+        out.push_str(PROCEDURE);
+        for (name, text) in procedure {
+            let _ = write!(out, "\n## Procedure from {name}\n\n{}\n", text.trim_end());
+        }
     }
     if !skills.is_empty() {
         out.push_str(
@@ -1036,21 +1063,26 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_appends_instructions_skills_and_references() {
+    fn system_prompt_appends_instructions_procedure_skills_and_references() {
         insta::assert_snapshot!(system_prompt(
             &[("general.md".into(), "Be terse.\n".into())],
+            &[(
+                "/skills/triage/SKILL.md".into(),
+                "Run `gh pr view`, then present the findings.\n".into()
+            )],
             &[Path::new("/skills/ring")],
             &[Path::new("/src/services"), Path::new("/src/sanic-cli")]
         ));
     }
 
     #[test]
-    fn where_it_runs_comes_before_the_profiles_instructions_and_skills() {
+    fn where_it_runs_comes_before_the_profiles_instructions_procedure_and_skills() {
         let text = system_prompt(
             &[(
                 "general.md".into(),
                 "Present each finding for triage.\n".into(),
             )],
+            &[("/skills/triage/SKILL.md".into(), "Post it.\n".into())],
             &[Path::new("/skills/ring")],
             &[],
         );
@@ -1058,6 +1090,15 @@ mod tests {
         let environment = at("# Where you're running");
         assert!(at("Your answer is JSON") < environment, "{text}");
         assert!(environment < at("# Instructions from general.md"), "{text}");
+        // The procedure follows the profile's instructions, and says it's
+        // to be read in the light of where it runs.
+        let procedure = at("# Procedure\n");
+        assert!(at("# Instructions from general.md") < procedure, "{text}");
+        assert!(
+            procedure < at("## Procedure from /skills/triage/SKILL.md"),
+            "{text}"
+        );
+        assert!(text[procedure..].contains("\"Where you're running\" applies"));
         assert!(environment < at("# Skills"), "{text}");
         assert!(text[environment..].contains("run `gh`"), "{text}");
         // It's said once, however many instruction files there are.

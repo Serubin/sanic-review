@@ -3,7 +3,7 @@ source: crates/cli/src/tui/config/tests.rs
 expression: draw(&editor).backend()
 ---
 "┌ /home/u/.config/sanic-review/config.toml → /home/u/dotfiles/sanic. 4 unsaved ┐"
-"│ # instructions = []                                                (default) │"
+"│ # procedure = []                                                   (default) │"
 "│ # skill directories the agent may read                                       │"
 "│ # skills = []                                                      (default) │"
 "│ # the review model for this profile's PRs                                    │"

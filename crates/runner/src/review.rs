@@ -34,6 +34,7 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct AgentProfile {
     pub instructions: Vec<PathBuf>,
+    pub procedure: Vec<PathBuf>,
     pub skills: Vec<PathBuf>,
     pub model: Option<String>,
 }
@@ -42,6 +43,7 @@ impl From<&Profile> for AgentProfile {
     fn from(profile: &Profile) -> Self {
         Self {
             instructions: profile.instructions.clone(),
+            procedure: profile.procedure.clone(),
             skills: profile.skills.clone(),
             model: profile.model.clone(),
         }
@@ -205,11 +207,12 @@ impl ReviewRunner {
     }
 
     /// The directories besides the worktree that `run`'s agent could read,
-    /// as a chat should get them again: its run dirs, skills and the
-    /// reference checkouts that exist.
+    /// as a chat should get them again: its run dirs, procedure and skills,
+    /// and the reference checkouts that exist.
     fn chat_dirs(&self, run: &QueuedRun, settings: &RunSettings) -> Vec<PathBuf> {
         run_dirs(run, &self.data_dir.join("runs").join(run.id.to_string()))
             .into_iter()
+            .chain(settings.profile.procedure.iter().cloned())
             .chain(settings.profile.skills.iter().cloned())
             .chain(
                 existing_dirs(&settings.reference_dirs)
@@ -232,16 +235,8 @@ impl ReviewRunner {
         let diff_path = run_dir.join("pr.diff");
         write(&diff_path, &diff).await?;
 
-        let mut instructions = Vec::new();
-        for path in &profile.instructions {
-            let text = tokio::fs::read_to_string(path)
-                .await
-                .wrap_err_with(|| format!("reading instructions {}", path.display()))?;
-            instructions.push((path.display().to_string(), text));
-        }
-        let skills: Vec<&Path> = profile.skills.iter().map(PathBuf::as_path).collect();
         let references = existing_dirs(&settings.reference_dirs);
-        let system_prompt = prompt::system_prompt(&instructions, &skills, &references);
+        let system_prompt = system_prompt(profile, &references).await?;
         let target = target(run)?;
         let brief = match (&run.revision, target, &run.resume) {
             (Some(revision), Some(target), _) => {
@@ -278,10 +273,11 @@ impl ReviewRunner {
         write(&run_dir.join("system.md"), &system_prompt).await?;
         write(&run_dir.join("prompt.md"), &brief).await?;
 
-        // The run dir holds the diff; skills and reference checkouts are
-        // read in place.
+        // The run dir holds the diff; the procedure's files, skills and
+        // reference checkouts are read in place.
         let add_dirs: Vec<PathBuf> = run_dirs(run, run_dir)
             .into_iter()
+            .chain(profile.procedure.iter().cloned())
             .chain(profile.skills.iter().cloned())
             .chain(references.iter().map(|p| p.to_path_buf()))
             .collect();
@@ -325,6 +321,33 @@ impl ReviewRunner {
         };
         resumed(reviewed, run, worktree, &index).await
     }
+}
+
+/// The system prompt for a run of `profile`, reading its instruction files
+/// and procedure.
+async fn system_prompt(profile: &AgentProfile, references: &[&Path]) -> Result<String> {
+    let mut instructions = Vec::new();
+    for path in &profile.instructions {
+        let text = tokio::fs::read_to_string(path)
+            .await
+            .wrap_err_with(|| format!("reading instructions {}", path.display()))?;
+        instructions.push((path.display().to_string(), text));
+    }
+    let mut procedure = Vec::new();
+    for dir in &profile.procedure {
+        let path = dir.join("SKILL.md");
+        let text = tokio::fs::read_to_string(&path)
+            .await
+            .wrap_err_with(|| format!("reading procedure {}", path.display()))?;
+        procedure.push((path.display().to_string(), text));
+    }
+    let skills: Vec<&Path> = profile.skills.iter().map(PathBuf::as_path).collect();
+    Ok(prompt::system_prompt(
+        &instructions,
+        &procedure,
+        &skills,
+        references,
+    ))
 }
 
 /// `reviewed`, `run`'s answer, with, when `run` resumed a session, where

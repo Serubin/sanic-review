@@ -223,14 +223,15 @@ watches, the reviews you're asked for, your open PRs.
 | Enter | edit a key, flip a bool, open a repo entry, rename a profile |
 | `+` / `-` | add or remove a list item, repo entry, glob or profile |
 | `K` / `J` | move one up or down, since order decides what wins |
-| `f` | suggest teams, orgs and checkouts, models, skills or instructions |
+| `f` | suggest teams, orgs and checkouts, models, procedure, skills or instructions |
 | `u` | unset a key, back to its default |
 | `v` / Ctrl-S | show the diff / save, after showing it |
 | Esc, `q` | back out of an entry, or leave, asking about unsaved edits |
 
 While typing, Enter sets, a blank unsets and Esc cancels. What the field
 could hold drops down under it as you type (paths, models, your teams,
-orgs and repos, a profile's skills and instructions, a key's few values):
+orgs and repos, a profile's procedure, skills and instructions, a key's
+few values):
 ↑/↓ choose, Tab takes the chosen one or else the first, Enter takes the
 chosen one, and Esc closes the list. Fields take readline's emacs keys
 (Ctrl-A/E/B/F/K/U/W, Alt-B/F, the arrows, Home/End), or vi's with
@@ -261,6 +262,7 @@ authors = ["*", "!dependabot"]    # whose PRs you owe a review; "*" unless set
 # moves profiles and their entries.
 [profile.default]
 instructions = ["~/.config/sanic-review/instructions/general.md"]
+procedure = []                    # SKILL.md dirs the agent follows to review
 skills = []                       # directories of SKILL.md skills
 model = "auto"                    # your claude default; or name a model
 # manual_reviews = true           # overrides [runner]'s, for this profile's PRs
@@ -271,7 +273,9 @@ repos = [
 ```
 
 Instruction files are appended to the agent's system prompt, so that's where
-your house style and pet peeves go. Every option, and how matching and
+your house style and pet peeves go. A `procedure` skill's `SKILL.md` is
+appended too, as the steps the agent follows, where `skills` are only
+there to read. Every option, and how matching and
 precedence work, is in [docs/DESIGN.md](docs/DESIGN.md#configuration).
 
 ## Development

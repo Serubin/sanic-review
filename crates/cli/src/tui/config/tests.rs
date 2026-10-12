@@ -87,7 +87,7 @@ fn shows_every_key_with_defaults_for_the_unset_ones() {
     select(&mut editor, 1, 2);
     insta::assert_snapshot!(draw(&editor).backend());
     // A profile's unset keys show what they inherit.
-    select(&mut editor, 5, 2);
+    select(&mut editor, 5, 3);
     insta::assert_snapshot!("profile", draw(&editor).backend());
 }
 
@@ -260,7 +260,7 @@ fn the_editor_says_what_manual_reviews_its_edits_leave() {
     };
     assert_eq!(editor.manual_reviews(), set);
     // Unset, the profile follows the runner's again.
-    select(&mut editor, 5, 4);
+    select(&mut editor, 5, 5);
     let _ = press(&mut editor, KeyCode::Char('u'));
     assert_eq!(editor.manual_reviews(), ManualReviews::runner(true));
 }
@@ -277,7 +277,7 @@ fn the_footer_offers_k_j_on_profiles_and_entries_after_the_other_keys() {
             .collect::<String>()
     };
     // `[profile.ring]`, then its one entry, the row after its keys.
-    for row in [0, 9] {
+    for row in [0, 10] {
         select(&mut editor, 5, row);
         // At 80 columns the keys it showed before come first, and `K/J`
         // is what gives way.
@@ -484,7 +484,7 @@ fn list_items_are_added_edited_moved_and_removed() {
 fn repo_entries_open_switch_kind_and_take_globs() {
     let mut editor = editor(CONFIG);
     // profile.ring's repos, after its name and eight keys.
-    select(&mut editor, 5, 9);
+    select(&mut editor, 5, 10);
     let _ = press(&mut editor, KeyCode::Enter);
     assert!(editor.entry.is_some());
     // github → checkout, which needs a path.
@@ -622,7 +622,7 @@ fn tab_completes_paths_as_they_are_typed() {
     std::fs::create_dir_all(dir.path().join("skills/review")).unwrap();
     let mut editor = editor(CONFIG);
     // profile.ring's skills.
-    select(&mut editor, 5, 2);
+    select(&mut editor, 5, 3);
     let _ = press(&mut editor, KeyCode::Char('+'));
     typed(&mut editor, &format!("{}/sk", dir.path().display()));
     let _ = press(&mut editor, KeyCode::Tab);
@@ -668,7 +668,7 @@ fn counts_show_what_the_config_watches_and_each_entrys_share() {
         "repos = [{ github = \"org\" }, { github = \"org/api\", paths = [\"v/**\"] }]",
     );
     let mut editor = editor(&text);
-    select(&mut editor, 5, 9);
+    select(&mut editor, 5, 10);
     let now = SystemTime::UNIX_EPOCH;
     let wanted = editor.want(now);
     insta::assert_snapshot!("counting", draw(&editor).backend());
@@ -813,7 +813,7 @@ fn entry_counts_follow_their_entry_and_skip_ones_not_yet_loaded() {
         "repos = [{ github = \"org\" }, { github = \"else/api\" }]",
     );
     let mut editor = editor(&text);
-    select(&mut editor, 5, 10);
+    select(&mut editor, 5, 11);
     let _ = editor.want(SystemTime::UNIX_EPOCH);
     let covers = |editor: &ConfigEditor, n| {
         editor
@@ -877,7 +877,7 @@ fn entries_on_one_checkout_through_two_remotes_keep_their_own_counts() {
     };
     let path = Path::new("/c/config.toml");
     editor.checked(generation, check::check(&text, path, &ByRemote));
-    select(&mut editor, 5, 10);
+    select(&mut editor, 5, 11);
     let _ = editor.want(SystemTime::UNIX_EPOCH);
     let scope = |n| {
         editor
@@ -932,7 +932,7 @@ fn f_on_repos_suggests_orgs_and_scans_for_checkouts() {
         Query::Orgs,
         Answer::Orgs(vec!["org".into(), "other".into()]),
     );
-    select(&mut editor, 5, 9);
+    select(&mut editor, 5, 10);
     let _ = press(&mut editor, KeyCode::Char('f'));
     let Some(Popup::Suggest(suggest)) = &editor.popup else {
         panic!("no suggestions");
@@ -1066,13 +1066,14 @@ fn the_dropdown_offers_teams_choices_and_what_f_finds() {
     let _ = press(&mut editor, KeyCode::Esc);
 
     // A profile's skills, found once for the dropdown as `f` finds them.
-    select(&mut editor, 5, 2);
+    select(&mut editor, 5, 3);
     let Outcome::Find(Find::Extras { profile, .. }) = press(&mut editor, KeyCode::Char('+')) else {
         panic!("nothing to find");
     };
     assert!(menu(&editor).is_empty());
     editor.found(Found::Extras {
         profile,
+        procedure: Vec::new(),
         skills: vec![discover::skills::Skill {
             dir: PathBuf::from("/src/.claude/skills/review"),
             name: "review".into(),
@@ -1123,13 +1124,14 @@ fn the_dropdown_offers_teams_choices_and_what_f_finds() {
 #[test]
 fn f_on_skills_asks_for_whats_in_the_checkouts_and_adds_what_you_pick() {
     let mut editor = editor(CONFIG);
-    select(&mut editor, 5, 2);
+    select(&mut editor, 5, 3);
     let Outcome::Find(Find::Extras { profile, .. }) = press(&mut editor, KeyCode::Char('f')) else {
         panic!("nothing to find");
     };
     assert_eq!(profile, "ring");
     editor.found(Found::Extras {
         profile,
+        procedure: Vec::new(),
         skills: vec![discover::skills::Skill {
             dir: PathBuf::from("/src/.claude/skills/review"),
             name: "review".into(),
@@ -1150,6 +1152,37 @@ fn f_on_skills_asks_for_whats_in_the_checkouts_and_adds_what_you_pick() {
 }
 
 #[test]
+fn f_on_procedure_offers_the_skills_it_lacks_and_adds_what_you_pick() {
+    let mut editor = editor(CONFIG);
+    select(&mut editor, 5, 2);
+    let Outcome::Find(Find::Extras { profile, .. }) = press(&mut editor, KeyCode::Char('f')) else {
+        panic!("nothing to find");
+    };
+    editor.found(Found::Extras {
+        profile,
+        procedure: vec![discover::skills::Skill {
+            dir: PathBuf::from("/src/.claude/skills/triage"),
+            name: "triage".into(),
+            description: None,
+        }],
+        skills: vec![discover::skills::Skill {
+            dir: PathBuf::from("/src/.claude/skills/review"),
+            name: "review".into(),
+            description: None,
+        }],
+        instructions: Vec::new(),
+    });
+    let _ = press(&mut editor, KeyCode::Char(' '));
+    let _ = press(&mut editor, KeyCode::Enter);
+    let text = editor.doc.text();
+    assert!(
+        text.contains("procedure = [\"/src/.claude/skills/triage\"]"),
+        "{text}"
+    );
+    assert!(!text.contains("skills/review"), "{text}");
+}
+
+#[test]
 fn finds_land_once_and_only_on_the_popup_that_asked() {
     let mut editor = editor(CONFIG);
     answer(
@@ -1158,7 +1191,7 @@ fn finds_land_once_and_only_on_the_popup_that_asked() {
         Answer::Orgs(vec!["ORG".into(), "Other".into()]),
     );
     // A profile's repos: orgs you're in are matched without case.
-    select(&mut editor, 5, 9);
+    select(&mut editor, 5, 10);
     let _ = press(&mut editor, KeyCode::Char('f'));
     let Some(Popup::Suggest(suggest)) = &editor.popup else {
         panic!("no suggestions");
@@ -1190,12 +1223,13 @@ fn finds_land_once_and_only_on_the_popup_that_asked() {
 
     // Skills a closed popup asked for don't land on another profile's.
     let _ = press(&mut editor, KeyCode::Esc);
-    select(&mut editor, 5, 2);
+    select(&mut editor, 5, 3);
     let Outcome::Find(Find::Extras { profile, .. }) = press(&mut editor, KeyCode::Char('f')) else {
         panic!("nothing to find");
     };
     editor.found(Found::Extras {
         profile: format!("not-{profile}"),
+        procedure: Vec::new(),
         skills: vec![discover::skills::Skill {
             dir: PathBuf::from("/elsewhere/review"),
             name: "review".into(),

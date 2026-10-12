@@ -1181,6 +1181,7 @@ impl ConfigEditor {
             What::Teams { .. } => " Count review requests to these teams ".to_owned(),
             What::Repos { profile } => format!(" Watch in [profile.{profile}] "),
             What::Model { key } => format!(" {key} "),
+            What::Procedure { profile } => format!(" Procedure for [profile.{profile}] "),
             What::Skills { profile } => format!(" Skills for [profile.{profile}] "),
             What::Instructions { profile } => format!(" Instructions for [profile.{profile}] "),
         };
@@ -1538,7 +1539,10 @@ const HELP: &[(&str, &str)] = &[
     ),
     ("-", "remove it; a profile asks first"),
     ("K/J", "move an item, entry or profile up or down"),
-    ("f", "suggest teams, repos, models, skills or instructions"),
+    (
+        "f",
+        "suggest teams, repos, models, procedure, skills or instructions",
+    ),
     ("u", "unset the key, back to its default"),
     ("v", "show the changes"),
     ("Ctrl-S", "save, after showing the changes"),

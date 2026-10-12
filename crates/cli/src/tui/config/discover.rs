@@ -27,6 +27,7 @@ pub fn find(find: Find, config: &Path, resolver: &dyn CheckoutResolver) -> Found
         Find::Extras {
             profile,
             entries,
+            procedure,
             skills,
             instructions,
         } => {
@@ -39,6 +40,7 @@ pub fn find(find: Find, config: &Path, resolver: &dyn CheckoutResolver) -> Found
             let dirs = skills::profile_dirs(&entries, base, &places);
             Found::Extras {
                 profile,
+                procedure: skills::skills_for(&dirs, &expand(&procedure), &places),
                 skills: skills::skills_for(&dirs, &expand(&skills), &places),
                 instructions: skills::instructions_for(&dirs, &expand(&instructions)),
             }
@@ -89,6 +91,7 @@ mod tests {
                     path: "repo".into(),
                     remote: None,
                 }],
+                procedure: vec!["repo/.claude/skills/review".into()],
                 skills: Vec::new(),
                 instructions: vec!["repo/AGENTS.md".into()],
             },
@@ -96,6 +99,7 @@ mod tests {
             &NoCheckouts,
         );
         let Found::Extras {
+            procedure,
             skills,
             instructions,
             ..
@@ -104,6 +108,10 @@ mod tests {
             panic!("{found:?}");
         };
         assert_eq!(skills[0].dir, dir.path().join("repo/.claude/skills/review"));
+        assert!(
+            !procedure.iter().any(|s| s.dir == skills[0].dir),
+            "the procedure has the skill already"
+        );
         assert!(instructions.is_empty(), "AGENTS.md is there already");
 
         let missing = dir.path().join("nope");

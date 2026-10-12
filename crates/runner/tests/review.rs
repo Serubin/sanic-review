@@ -143,6 +143,7 @@ fn context() -> PrContext {
 fn profile(instructions: Vec<PathBuf>) -> AgentProfile {
     AgentProfile {
         instructions,
+        procedure: vec![],
         skills: vec![],
         model: Some("claude-sonnet-5".into()),
     }
@@ -643,4 +644,45 @@ async fn missing_instruction_files_are_errors() {
         format!("{err:?}").contains("reading instructions"),
         "{err:?}"
     );
+}
+
+#[tokio::test]
+async fn the_procedure_is_inlined_and_its_dir_readable() {
+    let output = success(&json!({
+        "summary": "Fine.", "suggested_verdict": "none", "comments": []
+    }));
+    let s = setup("", &output, Duration::from_secs(30));
+    let dir = s.fake.path().join("triage");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join("SKILL.md"), "Check each loop for a ring out.").unwrap();
+    let settings = s.settings(AgentProfile {
+        procedure: vec![dir.clone()],
+        ..profile(vec![])
+    });
+    s.runner
+        .review(&s.run, &context(), &settings, pending())
+        .await
+        .unwrap()
+        .expect("not cancelled");
+    let args = read(s.fake.path(), "args");
+    assert!(args.contains("Check each loop for a ring out."), "{args}");
+    assert!(
+        args.contains(&format!("--add-dir\n{}\n", dir.display())),
+        "{args}"
+    );
+}
+
+#[tokio::test]
+async fn a_procedure_without_its_skill_file_is_an_error() {
+    let s = setup("", &success(&json!({})), Duration::from_secs(30));
+    let settings = s.settings(AgentProfile {
+        procedure: vec![s.fake.path().to_path_buf()],
+        ..profile(vec![])
+    });
+    let err = s
+        .runner
+        .review(&s.run, &context(), &settings, pending())
+        .await
+        .unwrap_err();
+    assert!(format!("{err:?}").contains("reading procedure"), "{err:?}");
 }

@@ -199,6 +199,13 @@ pub const PROFILE: &[Field] = &[
     )
     .paths(),
     Field::new(
+        "procedure",
+        Kind::List,
+        Fallback::Nothing,
+        "skill directories whose `SKILL.md` the agent follows to review",
+    )
+    .paths(),
+    Field::new(
         "skills",
         Kind::List,
         Fallback::Nothing,
