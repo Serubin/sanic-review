@@ -186,6 +186,7 @@
         }
         const popup = dialog.firstElementChild;
         popup.replaceChildren(document.importNode(card, true));
+        homeLinks(popup);
         dialog.hidden = false;
         behind(true);
         opener = from;
@@ -288,7 +289,7 @@
       }
       case "q":
         if (page === "index") say("q goes back from other pages; close the tab to leave");
-        else go("/");
+        else go(indexHref());
         break;
       case "Tab": {
         const n = lists().length;
@@ -923,6 +924,74 @@
       setTab(at);
       // A click leaves focus on the page, so Enter opens the selected row.
       if (e.detail !== 0) tab.blur();
+    });
+  }
+  // The index's filter, its URL's query, remembered for this tab: links
+  // to the bare index go back to it filtered as you left it, while a bare
+  // `/` you type or load stays unfiltered. An empty filter forgets it.
+  const FILTER_KEY = "sanic-review.filter";
+  function lastFilter() {
+    try {
+      return window.sessionStorage.getItem(FILTER_KEY) || "";
+    } catch (err) {
+      return "";
+    }
+  }
+  function keepFilter(query) {
+    try {
+      if (query) window.sessionStorage.setItem(FILTER_KEY, query);
+      else window.sessionStorage.removeItem(FILTER_KEY);
+    } catch (err) {
+      // Storage may be off; the links stay bare.
+    }
+    homeLinks(document);
+  }
+  function indexHref() {
+    const query = lastFilter();
+    return query ? "/?" + query : "/";
+  }
+  // Off the index, every link to a bare `/` is a way back to it; on it, a
+  // bare `/` is also where a control such as `clear` or hiding archived
+  // PRs goes, so only the top bar's is. Marked, since a rewritten link no
+  // longer matches `href="/"` and the index's filter can change again.
+  const INDEX_LINKS = page === "index" ? "header.topbar a.home" : 'a[href="/"], a[data-index]';
+  function homeLinks(root) {
+    const href = indexHref();
+    root.querySelectorAll(INDEX_LINKS).forEach(function (link) {
+      link.dataset.index = "";
+      link.setAttribute("href", href);
+    });
+  }
+  // The index's filter as the server spells it: a URL loaded as typed,
+  // such as `/?q=`, may not be, while the panes reread with the server's.
+  function shownFilter() {
+    const panes = document.getElementById("panes");
+    const href = panes && panes.getAttribute("hx-get");
+    return href ? href.replace(/^\/\??/, "") : window.location.search.slice(1);
+  }
+  function recall() {
+    if (page === "index") keepFilter(shownFilter());
+    else homeLinks(document);
+  }
+  recall();
+  // The sidebar, its clear links and the refresh all put the filter in
+  // the URL this way, as the server spells it. The panes aren't swapped
+  // in yet.
+  if (page === "index") {
+    document.body.addEventListener("htmx:replacedInHistory", function () {
+      keepFilter(window.location.search.slice(1));
+    });
+  }
+  // A page Back brings back as it was has the links, and on the index the
+  // URL, of when you left it; the filter may have changed since.
+  window.addEventListener("pageshow", function (e) {
+    if (e.persisted) recall();
+  });
+  document.body.addEventListener("htmx:historyRestore", recall);
+  // On the index nothing swapped in links to it, and the top bar stays.
+  if (page !== "index") {
+    document.body.addEventListener("htmx:afterSwap", function (e) {
+      homeLinks(e.detail.target.isConnected ? e.detail.target : document);
     });
   }
   // The files view's layout, remembered the same way.

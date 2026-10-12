@@ -888,10 +888,16 @@ fonttools (run through `uv`, which only this task needs) to
     empty.
   - The server filters, and the filter is the URL's query
     (`?author=alice&state=unseen&q=retry`), so a filtered index is a
-    link. Nothing is kept per browser: a bare `/` is unfiltered. Ticking a
-    value, or typing, rereads the lists in place and puts the filter in
-    the URL. The refresh asks with the same query, so it keeps the filter.
-    It replaces the facets but not the text box, so typing isn't lost.
+    link. Ticking a value, or typing, rereads the lists in place and puts
+    the filter in the URL. The refresh asks with the same query, so it
+    keeps the filter. It replaces the facets but not the text box, so
+    typing isn't lost.
+  - The tab remembers the index's last query, archived view included
+    (`sessionStorage`), so the top bar's home link, `q`, and the other
+    links to the index go back to it filtered as you left it. A bare `/`
+    you type or load is unfiltered, and the index unfiltered forgets
+    what was kept. Without the script, or with storage off, those links
+    go to a bare `/`.
   - A filtered list's heading and its group headers say `2 of 8`, and a
     group the filter empties is left out. Under the heading, `N hidden by
     filter · clear` says what the filter hides. The recency window's line
