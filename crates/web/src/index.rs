@@ -18,7 +18,7 @@ use sanic_core::{
     manual::ManualReviews,
     pr::PrKey,
     skip::{PrFacts, Skip},
-    start::Why,
+    start::ReviewNow,
     state::{Approval, Block, Checks, Merge, PrState, Urgency},
 };
 use sanic_store::{Decided, List, MyPr, OwedReview, RowFacts};
@@ -235,14 +235,25 @@ pub fn owed_status(pr: &OwedReview, overview: &Overview) -> (String, &'static st
     }
 }
 
-/// Why a review of `pr` may be started by hand, as the TUI's `r` decides.
-pub fn why(pr: &OwedReview, overview: &Overview) -> Option<Why> {
-    Why::of(
+/// What `r` and Review now offer for `pr`, a review you owe, as the
+/// TUI's `r` decides.
+pub fn owed_now(pr: &OwedReview, overview: &Overview) -> ReviewNow {
+    pr.review_now(
         overview.skipped.get(&pr.key),
-        pr.latest_status(),
-        pr.held(&overview.manual),
-        pr.behind() && !overview.waiting.contains_key(&pr.key),
+        &overview.manual,
+        overview.waiting.contains_key(&pr.key),
     )
+}
+
+/// What `r` and Review now offer for `key`, which is `yours` or else a
+/// review you owe if the lists have it.
+pub fn review_now(key: &PrKey, overview: &Overview, yours: bool) -> ReviewNow {
+    if yours {
+        return ReviewNow::Yours;
+    }
+    overview
+        .owed_review(key)
+        .map_or(ReviewNow::Nothing, |pr| owed_now(pr, overview))
 }
 
 /// Tells htmx the address bar's URL once the sidebar's request swaps in.
@@ -846,7 +857,7 @@ fn unseen(overview: &Overview, key: &PrKey) -> Markup {
 fn owed_row(app: &App, pr: &OwedReview, overview: &Overview, back: &str) -> Markup {
     let (label, class) = index_status(pr, overview);
     let lead = owed_lead(pr, overview, &label, class);
-    let why = why(pr, overview);
+    let starts = owed_now(pr, overview).starts();
     let href = pr_href(&pr.key);
     let facts = overview.facts.get(&pr.key);
     let waiting = overview
@@ -881,7 +892,7 @@ fn owed_row(app: &App, pr: &OwedReview, overview: &Overview, back: &str) -> Mark
         is_draft: pr.is_draft,
     };
     let actions = html! {
-        @if why.is_some() {
+        @if starts {
             a.linkbtn href={ (href) "/review-now" } data-dialog { "review now " (keycap("r")) }
         }
         a.linkbtn href={ (href) "/ignore" } { "ignore by title " (keycap("i")) }
@@ -893,7 +904,7 @@ fn owed_row(app: &App, pr: &OwedReview, overview: &Overview, back: &str) -> Mark
     html! {
         // Selection follows the PR across refreshes, not the row's place.
         div.ib.archived[pr.archived] data-row data-key=(pr.key) data-href=(href)
-            data-review-now=[why.as_ref().map(|_| format!("{href}/review-now"))]
+            data-review-now={ (href) "/review-now" }
             data-ignore={ (href) "/ignore" }
             data-chat=[pr.chat_run.map(|_| format!("{href}#chat"))] {
             (unseen(overview, &pr.key))
@@ -936,6 +947,7 @@ fn my_row(app: &App, pr: &MyPr, overview: &Overview, back: &str) -> Markup {
     };
     html! {
         div.ib.archived[pr.archived] data-row data-key=(pr.key) data-href=(href)
+            data-review-now={ (href) "/review-now" }
             data-chat=[pr.chat_run.map(|_| format!("{href}#chat"))] {
             (unseen(overview, &pr.key))
             (row.cells(app, &pr.title))

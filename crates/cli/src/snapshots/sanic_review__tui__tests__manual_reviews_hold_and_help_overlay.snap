@@ -1,6 +1,5 @@
 ---
 source: crates/cli/src/tui.rs
-assertion_line: 2033
 expression: "draw(&mut app, 80, 24).backend()"
 ---
 "┌ Reviews you owe (5) ─────────────────────────────────────────────────────────┐"
@@ -13,7 +12,7 @@ expression: "draw(&mut app, 80, 24).backend()"
 "└────────│ Z               every pane back to fit                     │────────┘"
 "┌ Your PR│ j/k, Down/Up    move in the pane                           │────────┐"
 "│changes │ g/G, Home/End   first, last row                            │rch     │"
-"│mergeabl│ r               review now: failed, held or skipped        │ettings │"
+"│mergeabl│ r               review now                                 │ettings │"
 "└────────│ x               archive or unarchive the selected PR       │────────┘"
 "┌ Activit│ X               show or hide archived PRs                  │────────┐"
 "│16:36:00│ i               skip PRs with titles like the selected one │out of b│"

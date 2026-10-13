@@ -25,6 +25,7 @@ mod page;
 mod pr;
 mod queue;
 mod regenerate;
+mod review_now;
 mod settings;
 mod strip;
 mod submit;
@@ -265,7 +266,7 @@ impl Dashboard {
             .route("/pr/{owner}/{name}/{number}", get(pr::page))
             .route(
                 "/pr/{owner}/{name}/{number}/review-now",
-                get(pr::confirm_review_now).post(pr::review_now),
+                get(review_now::confirm).post(review_now::start_now),
             )
             .route("/pr/{owner}/{name}/{number}/archive", post(pr::archive))
             .route(

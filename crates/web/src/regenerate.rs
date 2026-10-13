@@ -9,6 +9,7 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
 };
 use maud::{Markup, html};
+use sanic_core::pr::PrKey;
 use sanic_store::{PrPage, ReviewRun};
 use serde::Deserialize;
 use tracing::info;
@@ -21,6 +22,21 @@ use crate::{
     submit::RunPath,
     threads,
 };
+
+/// What revising a review costs.
+pub const COST: &str = "Spends tokens: the agent works again, with your instruction.";
+
+/// A card's go that revises `run`, a review of `pr`, with the card's
+/// instruction box.
+pub fn go(app: &App, pr: &PrKey, run: i64) -> Markup {
+    let action = format!("{}/runs/{run}/regenerate", pr_href(pr));
+    html! {
+        form #confirm method="post" action=(action) {
+            (csrf_field(app))
+            button.btn.go type="submit" { "Revise the review" (keycap("y")) }
+        }
+    }
+}
 
 /// The PR and its run at `path`, which must be one of its review runs,
 /// numbered as the PR page's run list numbers it.
@@ -51,7 +67,7 @@ fn card(pr: &PrPage, (run, number): (&ReviewRun, usize), extra: Markup, go: Mark
             code { (short(&run.head_sha)) }
         },
         extra,
-        cost: Some(html! { "Spends tokens: the agent works again, with your instruction." }),
+        cost: Some(html! { (COST) }),
         go,
         back: (&back, "Cancel"),
         tone: Tone::Ask,
@@ -82,7 +98,6 @@ pub async fn confirm(
         }
         None => String::new(),
     };
-    let action = format!("{}/runs/{}/regenerate", pr_href(&pr.key), run.id);
     let hold = app
         .store()
         .claude_hold(&pr.key)
@@ -112,13 +127,7 @@ pub async fn confirm(
         textarea #instruction form="confirm" name="instruction" rows="4" required autofocus
             placeholder="e.g. Drop the nits, and say more about the error handling." { (about) }
     };
-    let go = html! {
-        form #confirm method="post" action=(action) {
-            (csrf_field(&app))
-            button.btn.go type="submit" { "Revise the review" (keycap("y")) }
-        }
-    };
-    let content = card(&pr, (&run, number), explain, go);
+    let content = card(&pr, (&run, number), explain, go(&app, &pr.key, run.id));
     Ok(page::layout_in(
         &app,
         Kind::Confirm,

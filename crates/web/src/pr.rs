@@ -11,16 +11,11 @@ use axum::{
 };
 use maud::{Markup, html};
 use sanic_core::{
-    hold::ClaudeHold,
     pr::{PrKey, Thread, is_login},
-    skip::Skip,
-    start::Why,
     state::PrState,
 };
 use sanic_runner::diff::DiffIndex;
-use sanic_store::{
-    DraftRow, DraftStatus, LatestRun, OwedReview, Posted, PrPage, ReviewRun, ThreadChoice,
-};
+use sanic_store::{DraftRow, DraftStatus, OwedReview, Posted, PrPage, ReviewRun, ThreadChoice};
 use serde::Deserialize;
 use tracing::info;
 
@@ -29,9 +24,9 @@ use crate::{
     files::{self, Layout, View},
     filter::IndexQuery,
     hold,
-    index::{Overview, archive_form, owed_status, why},
+    index::{Overview, archive_form, owed_now, owed_status},
     links, markdown,
-    page::{self, Card, Kind, Tone, csrf_field, first_line, keycap, pr_ref, state_cell},
+    page::{self, Kind, csrf_field, first_line, keycap, pr_ref, state_cell},
     pr_href,
     strip::{self, Drift},
     submit,
@@ -94,10 +89,7 @@ pub async fn page(
             .map_err(Error::pr(&key))?
             .ok_or_else(|| Error::NotFound(format!("{} isn't tracked", key.url())))?
     };
-    let diff = match &shown {
-        Some(run) => read_diff(&app, run.id),
-        None => None,
-    };
+    let diff = shown.as_ref().and_then(|run| read_diff(&app, run.id));
     let chat = chat::section(&app, &key, shown.as_ref().map(|run| run.id));
     // Revising needs the shown review's agent session.
     let revisable = match &shown {
@@ -113,6 +105,7 @@ pub async fn page(
         None => Revise::default(),
     };
     let views = Views::new(&app, &key, &query, shown.as_ref(), diff.is_some()).await;
+    let (drift, starts) = offers(&app, &pr, &runs, shown.as_ref())?;
     let header = Header {
         pr: &pr,
         state,
@@ -122,6 +115,7 @@ pub async fn page(
         shown: shown.as_ref(),
         chat: chat.is_some(),
         revisable,
+        starts,
     };
     let existing = whole_pr(
         &app,
@@ -132,7 +126,6 @@ pub async fn page(
     );
     let code = threads::Code::new(existing);
     let ask = |thread: &Thread| ask_the_agent(&pr.key, shown.as_ref(), thread);
-    let drift = drift_of(&app, &pr, &runs, shown.as_ref())?;
     let content = html! {
         (pr_header(&app, &header))
         @if let Some(run) = &shown {
@@ -156,16 +149,21 @@ pub async fn page(
     ))
 }
 
-/// The strip's head part for `shown`, if the PR has moved past it,
-/// decided from this PR alone, whatever the recency window.
-fn drift_of<'a>(
+/// What the page offers to start, decided from this PR alone, whatever
+/// the recency window: the strip's head part for `shown`, if the PR has
+/// moved past it, and whether Review now would start a review.
+fn offers<'a>(
     app: &App,
     pr: &'a PrPage,
     runs: &'a [ReviewRun],
     shown: Option<&'a ReviewRun>,
-) -> Result<Option<Drift<'a>>, Error> {
+) -> Result<(Option<Drift<'a>>, bool), Error> {
     let one = Overview::load_pr(app, &pr.key).map_err(Error::pr(&pr.key))?;
-    Ok(shown.and_then(|run| Drift::new(app, &one, &pr.key, runs, run, &pr.head_sha)))
+    let drift = shown.and_then(|run| Drift::new(app, &one, &pr.key, runs, run, &pr.head_sha));
+    let starts = one
+        .owed_review(&pr.key)
+        .is_some_and(|o| owed_now(o, &one).starts());
+    Ok((drift, starts))
 }
 
 /// A run's stored diff, parsed; `None` if it's gone.
@@ -191,6 +189,8 @@ struct Header<'a> {
     chat: bool,
     /// The shown run has an agent session to revise it with.
     revisable: bool,
+    /// Review now would start a review; see [`offers`].
+    starts: bool,
 }
 
 /// The title; the PR's ref, author, run status and state, with its
@@ -205,7 +205,7 @@ fn pr_header(app: &App, h: &Header<'_>) -> Markup {
     // `—` fills a column; in a sentence it says nothing.
     let state = h.state.filter(|state| !state.is_blank());
     let status = h.owed.map(|o| owed_status(o, h.overview));
-    let why = h.owed.and_then(|o| why(o, h.overview));
+    let starts = h.starts;
     let ignorable = h.owed.filter(|o| h.overview.is_listed(&o.key));
     let href = pr_href(&pr.key);
     html! {
@@ -221,7 +221,7 @@ fn pr_header(app: &App, h: &Header<'_>) -> Markup {
                 }
                 @if let Some(state) = state { " · " (state_cell(state)) }
                 span.sp #pr-actions
-                    data-review-now=[why.as_ref().map(|_| format!("{href}/review-now"))]
+                    data-review-now={ (href) "/review-now" }
                     data-ignore=[ignorable.map(|_| format!("{href}/ignore"))]
                     data-chat=[h.chat.then_some("#chat")] {
                     @if h.revisable {
@@ -232,7 +232,7 @@ fn pr_header(app: &App, h: &Header<'_>) -> Markup {
                             }
                         }
                     }
-                    @if why.is_some() {
+                    @if starts {
                         a.btn href={ (href) "/review-now" } data-dialog { "Review now" (keycap("r")) }
                     }
                     @if ignorable.is_some() {
@@ -1229,204 +1229,6 @@ fn decided(
     }
     let back = format!("{}?run={}#draft-{id}", pr_href(&draft.key), draft.run_id);
     Ok(Redirect::to(&back).into_response())
-}
-
-/// What holds a review, on its Review now card: a `.claude` hold, a
-/// check of its head for one, or else manual reviews.
-fn held_by(claude: Option<&ClaudeHold>) -> Markup {
-    html! {
-        @if claude.is_some_and(|h| !h.findings.is_empty()) {
-            " · held for its " code { ".claude" } " changes"
-        } @else if claude.is_some_and(ClaudeHold::warns) {
-            " · held: checking it for " code { ".claude" } " changes failed"
-        } @else if claude.is_some() {
-            " · waiting until its head is checked for " code { ".claude" }
-            " changes, which it must be before it can start"
-        } @else {
-            " · held by " a href="/settings" { "manual reviews" }
-        }
-    }
-}
-
-/// What a review started by hand costs.
-const COST: &str = "Spends tokens: a full review of the head as last polled.";
-
-/// What it costs once the PR has moved past its latest review, which it
-/// resumes as a push's review does.
-const RESUME: &str = "Spends tokens: a review of the head as last polled, resuming the last \
-                      review's session if it can, else a full review.";
-
-pub async fn confirm_review_now(
-    State(app): State<Shared>,
-    Path(path): Path<PrPath>,
-) -> Result<Markup, Error> {
-    let key = path.key()?;
-    let overview = Overview::load_pr(&app, &key).map_err(Error::pr(&key))?;
-    let owed = overview.owed_review(&key);
-    let why = owed.and_then(|pr| why(pr, &overview));
-    let pr = app
-        .store()
-        .pr_page(&key)
-        .map_err(Error::pr(&key))?
-        .ok_or_else(|| Error::NotFound(format!("{} isn't tracked", key.url())))?;
-    let hold = owed.and_then(|pr| pr.claude_hold.as_ref());
-    let href = pr_href(&key);
-    let meta = html! {
-        (pr_ref(&key)) " · " (pr.author) " · head " code { (short(&pr.head_sha)) }
-        @if why == Some(Why::Held) { (held_by(hold)) }
-    };
-    let latest = owed.and_then(|pr| pr.latest_run.as_ref());
-    let error = latest.and_then(|run| Some((run.status.as_str(), run.error.as_deref()?)));
-    // As `serve` queues it: see `review_now`.
-    let cost = if owed.is_some_and(OwedReview::behind) {
-        RESUME
-    } else {
-        COST
-    };
-    let go = |label: &str| {
-        html! {
-            form #confirm method="post" action={ (href) "/review-now" } {
-                (csrf_field(&app))
-                // A dialog over the index sets it to `index`.
-                input type="hidden" name="next" value="pr";
-                button.btn.go type="submit" { (label) (keycap("y")) }
-            }
-        }
-    };
-    // Worded as the TUI's confirm is.
-    let (heading, extra, cost, go) = match &why {
-        None => (
-            html! { "Nothing to start" },
-            nothing_to_start(),
-            None,
-            html! {},
-        ),
-        Some(Why::Skipped(Skip::Reviewed { by, .. })) => (
-            html! { "Already reviewed by " (by) ". Review anyway?" },
-            html! {},
-            Some(html! { (cost) " It stays skipped for automatic reviews." }),
-            go("Review anyway"),
-        ),
-        Some(Why::Skipped(skip)) => (
-            html! { "Review this " (skip.label()) "-skipped PR anyway?" },
-            html! {},
-            Some(html! { (cost) " It stays skipped for automatic reviews." }),
-            go("Review anyway"),
-        ),
-        Some(Why::Failed) => (
-            html! { "Rerun this review?" },
-            html! {
-                @if let Some((status, error)) = error {
-                    div.error { (status) ": " (error) }
-                }
-            },
-            Some(html! { (cost) }),
-            go("Rerun the review"),
-        ),
-        Some(Why::Cancelled) => (
-            html! { "Review this again? You cancelled its last run." },
-            html! {},
-            Some(html! { (cost) }),
-            go("Review it again"),
-        ),
-        Some(Why::Held) => (
-            html! { "Start the held review now?" },
-            html! {},
-            Some(html! { (cost) }),
-            go("Start it"),
-        ),
-        Some(Why::MovedOn) => (
-            html! { "Review the new head?" },
-            moved_on(latest, &pr.head_sha),
-            Some(html! { (cost) }),
-            go("Review the new head"),
-        ),
-    };
-    let content = page::card(&Card {
-        kind: "Review now",
-        heading,
-        title: &pr.title,
-        meta,
-        // Whatever the reason to start it, the agent would load the PR's
-        // own skills and agents.
-        extra: html! { @if let Some(hold) = hold { (hold::warning(&key, hold)) } (extra) },
-        cost,
-        go,
-        back: (&href, if why.is_some() { "Cancel" } else { "Back" }),
-        tone: Tone::Ask,
-    });
-    Ok(page::layout_in(
-        &app,
-        Kind::Confirm,
-        "Review now",
-        &[crumb(&key), html! { "review now" }],
-        &content,
-    ))
-}
-
-/// Why the review-now card has nothing to start.
-fn nothing_to_start() -> Markup {
-    html! {
-        p.note {
-            "Only a review you owe whose latest run failed or crashed, that's "
-            "skipped or archived, that manual reviews are holding, or whose "
-            "latest review the PR has moved past with no review of its head on "
-            "its way, can be started by hand."
-        }
-    }
-}
-
-/// Which head the `latest` review is of, now that the PR's is `head`.
-fn moved_on(latest: Option<&LatestRun>, head: &str) -> Markup {
-    html! {
-        @if let Some(run) = latest {
-            p.note {
-                "Its latest review is of " code { (short(&run.head_sha)) }
-                ", and nothing is reviewing " code { (short(head)) } "."
-            }
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ReviewNowForm {
-    /// `index` to go back to the index afterwards, as a dialog opened
-    /// there asks; else the PR's page.
-    #[serde(default)]
-    next: String,
-    /// The index's URL, to go back to as it was.
-    back: Option<String>,
-}
-
-pub async fn review_now(
-    State(app): State<Shared>,
-    Path(path): Path<PrPath>,
-    Form(form): Form<ReviewNowForm>,
-) -> Result<Redirect, Error> {
-    let key = path.key()?;
-    // As the confirm page decided, again: it may be stale, or sent twice.
-    let overview = Overview::load_pr(&app, &key).map_err(Error::pr(&key))?;
-    let Some(owed) = overview.owed_review(&key) else {
-        return Err(Error::NotFound(format!(
-            "{} isn't a tracked review you owe",
-            key.url()
-        )));
-    };
-    if why(owed, &overview).is_none() {
-        return Err(Error::Refused(format!(
-            "there's nothing to start for {}: its review isn't failed, held or skipped, \
-             nor behind the PR's head with nothing on its way",
-            key.url()
-        )));
-    }
-    info!(url = %key.url(), "review requested from the dashboard");
-    let href = pr_href(&key);
-    app.control.review_now(key);
-    Ok(Redirect::to(&if form.next == "index" {
-        IndexQuery::from_href(form.back.as_deref()).href()
-    } else {
-        href
-    }))
 }
 
 #[derive(Debug, Deserialize)]

@@ -50,7 +50,7 @@ const KEYS: &[(&str, &str)] = &[
     ("j/k, Down/Up", "move in the list"),
     ("g/G, Home/End", "first, last row"),
     ("Enter", "open the selected PR"),
-    ("r", "review now: failed, held or skipped (asks first)"),
+    ("r", "review now (asks first)"),
     ("x", "archive or unarchive the selected PR"),
     ("X", "show or hide archived PRs"),
     ("Q", "the run queue: what's running and what's next"),

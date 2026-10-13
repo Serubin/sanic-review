@@ -202,7 +202,7 @@ activity and the log, plus a config editor. Its keys:
 | `j`/`k`, `g`/`G`, Tab/Shift-Tab | move, jump to first/last, switch pane |
 | `w` `p` `a` `l` | jump to a pane |
 | `o` | open the selected PR (or the index) in the dashboard |
-| `r` | start a failed, skipped, archived or held review, after confirming |
+| `r` | review the selected PR now, after confirming |
 | `x` / `X` | archive or unarchive / show archived |
 | `i` | ignore PRs by title |
 | `m` | turn manual reviews on or off; off asks first when that starts held reviews |

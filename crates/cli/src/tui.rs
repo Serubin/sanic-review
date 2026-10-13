@@ -37,10 +37,11 @@ use ratatui::{
 use sanic_core::{
     clock::{Clock, window_start},
     config::{CheckoutResolver, Keys, Unloadable},
+    hold::ClaudeHold,
     manual::ManualReviews,
     pr::PrKey,
     skip::{PrFacts, Skip, SkipRules},
-    start::Why,
+    start::{Coming, ReviewNow, Why},
     state::{PrState, Urgency},
 };
 use sanic_store::{Activity, ActivityKind, MyPr, OwedReview, QueueEntry, RunCounts, Store};
@@ -801,10 +802,11 @@ enum Overlay {
     Config(Box<ConfigEditor>),
     /// The run queue, which reorders and cancels through `serve`.
     Queue(Box<queue::QueueView>),
-    /// Waiting for a yes before asking for a review of this PR now.
+    /// `r`'s card for this PR: waiting for a yes when it starts a review,
+    /// else saying why it doesn't.
     ConfirmRerun {
         key: PrKey,
-        why: Why,
+        now: ReviewNow,
     },
     /// Waiting for a yes before quitting, which cancels these reviews.
     ConfirmQuit(Vec<PrKey>),
@@ -1002,12 +1004,12 @@ impl App {
                 _ => Flow::Continue,
             };
         }
-        if let Some(Overlay::ConfirmRerun { key: pr, .. }) = &self.overlay {
-            let pr = pr.clone();
+        if let Some(Overlay::ConfirmRerun { key: pr, now }) = &self.overlay {
+            let (pr, starts) = (pr.clone(), now.starts());
             self.overlay = None;
             return match key.code {
                 KeyCode::Char('c') if ctrl => self.quit(),
-                KeyCode::Char('y') => Flow::Request(Request::Rerun(pr)),
+                KeyCode::Char('y') if starts => Flow::Request(Request::Rerun(pr)),
                 // Anything else is a no, so a stray key can't spend tokens.
                 _ => Flow::Continue,
             };
@@ -1103,29 +1105,24 @@ impl App {
         }
     }
 
-    /// Asks to confirm a review of the selected PR you owe, if its latest
-    /// run failed or crashed, it's held, it's skipped or archived, or it
-    /// moved past its latest review with nothing on its way.
+    /// `r`'s card for the selected PR, of either list: asking to start a
+    /// review of one you owe, or saying why it doesn't.
     fn ask_rerun(&mut self) {
-        let selected = self.lists[Pane::Owed.index()]
-            .selected()
-            .and_then(|i| self.overview.owed.get(i))
-            .filter(|_| self.focus == Pane::Owed);
-        let Some(pr) = selected else {
+        let selected = self.lists[self.focus.index()].selected();
+        let picked = match self.focus {
+            Pane::Owed => selected
+                .and_then(|i| self.overview.owed.get(i))
+                .map(|pr| (pr.key.clone(), owed_now(pr, &self.overview))),
+            Pane::Mine => selected
+                .and_then(|i| self.overview.mine.get(i))
+                .map(|pr| (pr.key.clone(), ReviewNow::Yours)),
+            Pane::Activity | Pane::Log => None,
+        };
+        let Some((key, now)) = picked else {
             self.notice = Some(RERUN_HINT.into());
             return;
         };
-        let skip = self.overview.skipped.get(&pr.key);
-        let held = pr.held(&self.overview.manual_reviews);
-        let moved_on = pr.behind() && !self.overview.waiting.contains_key(&pr.key);
-        let Some(why) = Why::of(skip, pr.latest_status(), held, moved_on) else {
-            self.notice = Some(RERUN_HINT.into());
-            return;
-        };
-        self.overlay = Some(Overlay::ConfirmRerun {
-            key: pr.key.clone(),
-            why,
-        });
+        self.overlay = Some(Overlay::ConfirmRerun { key, now });
     }
 
     /// Turns manual reviews on if they're off (`on`), or off: that asks
@@ -1429,7 +1426,10 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         Some(Overlay::Ignore(editor)) => editor.render(frame, &loaded.owed, &overview.profiles),
         Some(Overlay::Config(editor)) => editor.render(frame),
         Some(Overlay::Queue(view)) => view.render(frame),
-        Some(Overlay::ConfirmRerun { key, why }) => render_confirm(frame, key, why),
+        Some(Overlay::ConfirmRerun { key, now }) => {
+            let owed = overview.owed.iter().find(|pr| &pr.key == key);
+            render_confirm(frame, key, now, owed);
+        }
         Some(Overlay::ConfirmQuit(running)) => render_confirm_quit(frame, running),
         Some(Overlay::ConfirmAutomatic(held)) => render_confirm_automatic(frame, *held),
         None => {}
@@ -1521,7 +1521,7 @@ fn deepest_offset(rows: &[ListItem<'_>], height: u16) -> usize {
     offset
 }
 
-const RERUN_HINT: &str = "r reviews a failed, held, skipped, archived or moved-on PR you owe now";
+const RERUN_HINT: &str = "r reviews the selected PR now, in either PR pane";
 
 /// Width of the status column in both PR panes, including the space that
 /// keeps a label as long as the column off what follows it.
@@ -1755,7 +1755,7 @@ const HELP: &[(&str, &str)] = &[
     ("Z", "every pane back to fit"),
     ("j/k, Down/Up", "move in the pane"),
     ("g/G, Home/End", "first, last row"),
-    ("r", "review now: failed, held or skipped"),
+    ("r", "review now"),
     ("x", "archive or unarchive the selected PR"),
     ("X", "show or hide archived PRs"),
     ("i", "skip PRs with titles like the selected one"),
@@ -1782,43 +1782,143 @@ fn render_help(frame: &mut Frame<'_>) {
     render_popup(frame, " Keys ", lines);
 }
 
-fn render_confirm(frame: &mut Frame<'_>, pr: &PrKey, why: &Why) {
-    let (head, tail) = match why {
-        Why::Skipped(Skip::Reviewed { by, .. }) => (
-            format!(" Already reviewed by {by}. Review"),
-            " anyway, at its current head? This spends tokens.",
+/// What `r` offers for a PR you owe, as the dashboard's Review now
+/// decides.
+fn owed_now(pr: &OwedReview, overview: &Overview) -> ReviewNow {
+    pr.review_now(
+        overview.skipped.get(&pr.key),
+        &overview.manual_reviews,
+        overview.waiting.contains_key(&pr.key),
+    )
+}
+
+/// `r`'s card's line for the PR's `.claude` hold, warning as the
+/// dashboard's card does, whatever it offers: an agent would load the PR's
+/// own skills and agents.
+fn claude_line(hold: Option<&ClaudeHold>, now: &ReviewNow) -> Option<Line<'static>> {
+    let hold = hold?;
+    let warn = Style::new().fg(Color::Red).add_modifier(Modifier::BOLD);
+    if !hold.findings.is_empty() {
+        Some(Line::styled(
+            " ⚠ It changes .claude: its skills can run commands as you.",
+            warn,
+        ))
+    } else if hold.warns() {
+        Some(Line::styled(
+            " ⚠ Checking it for .claude changes failed.",
+            warn,
+        ))
+    } else if *now == ReviewNow::Start(Why::Held) {
+        Some(Line::raw(
+            " Its head must be checked for .claude changes first.",
+        ))
+    } else {
+        None
+    }
+}
+
+/// `r`'s card, worded as the dashboard's Review now card is; `owed` is the
+/// PR's entry among the reviews you owe, for the heads it names.
+fn render_confirm(frame: &mut Frame<'_>, pr: &PrKey, now: &ReviewNow, owed: Option<&OwedReview>) {
+    let short = |sha: &str| sha.chars().take(8).collect::<String>();
+    let head = owed.map(|o| short(&o.head_sha)).unwrap_or_default();
+    let reviewed = owed
+        .and_then(|o| o.latest_run.as_ref())
+        .map(|run| short(&run.head_sha))
+        .unwrap_or_default();
+    // The popup doesn't wrap: each line fits its width.
+    let (first, rest): (String, Vec<String>) = match now {
+        ReviewNow::Start(why) => {
+            let (first, last) = match why {
+                Why::Skipped(Skip::Reviewed { by, .. }) => (
+                    format!(" Already reviewed by {by}. Review"),
+                    " anyway, at its current head? This spends tokens.",
+                ),
+                Why::Skipped(skip) => (
+                    format!(" Review this {}-skipped PR anyway,", skip.label()),
+                    " at its current head? This spends tokens.",
+                ),
+                Why::Failed => (
+                    " Rerun the review of".into(),
+                    " at its current head? This spends tokens.",
+                ),
+                Why::Cancelled => (
+                    " You cancelled the last review of".into(),
+                    " — review it again? This spends tokens.",
+                ),
+                Why::Held => (
+                    " Start the held review of".into(),
+                    " now? This spends tokens.",
+                ),
+                Why::MovedOn => (
+                    " Review the new head of".into(),
+                    " resuming its last review if it can? This spends tokens.",
+                ),
+                Why::Unreviewed => (
+                    " Review".into(),
+                    " now, at its current head? This spends tokens.",
+                ),
+            };
+            (first, vec![last.into()])
+        }
+        ReviewNow::Coming(coming) => {
+            let sha = if *coming == Coming::Waiting {
+                head
+            } else {
+                reviewed
+            };
+            let state = if *coming == Coming::Checking {
+                // Too long for one line.
+                vec![
+                    " is already waiting until its head is checked".into(),
+                    " for .claude changes. There's nothing to start.".into(),
+                ]
+            } else {
+                vec![
+                    format!(" is already {}.", coming.as_str()),
+                    " There's nothing to start.".into(),
+                ]
+            };
+            (format!(" A review of {sha} of"), state)
+        }
+        ReviewNow::Revise if owed.is_some_and(|o| o.head_runs.revisable) => (
+            " Review this again?".into(),
+            vec![
+                format!(" It hasn't changed since the review at {head}."),
+                " Revise that review with an instruction on the".into(),
+                " dashboard: Agent… on its PR page.".into(),
+            ],
         ),
-        Why::Skipped(skip) => (
-            format!(" Review this {}-skipped PR anyway,", skip.label()),
-            " at its current head? This spends tokens.",
+        // As the dashboard's card says.
+        ReviewNow::Revise => (
+            " Review this again?".into(),
+            vec![
+                format!(" It hasn't changed since the review at {head}."),
+                " That review has no agent session to resume, so".into(),
+                " there's nothing to start.".into(),
+            ],
         ),
-        Why::Failed => (
-            " Rerun the review of".into(),
-            " at its current head? This spends tokens.",
+        ReviewNow::Yours => (
+            " Nothing to start for".into(),
+            vec![
+                " It's your own PR: drafting replies to its feedback".into(),
+                " isn't built yet.".into(),
+            ],
         ),
-        Why::Cancelled => (
-            " You cancelled the last review of".into(),
-            " — review it again? This spends tokens.",
-        ),
-        Why::Held => (
-            " Start the held review of".into(),
-            " now? This spends tokens.",
-        ),
-        Why::MovedOn => (
-            " Review the new head of".into(),
-            " resuming its last review if it can? This spends tokens.",
-        ),
+        ReviewNow::Nothing => (" Nothing to start for".into(), Vec::new()),
     };
-    let lines = vec![
-        Line::raw(head),
-        Line::raw(format!(" {}", pr.url())),
-        Line::raw(tail),
-        Line::raw(""),
-        Line::from(vec![
+    let keys = if now.starts() {
+        vec![
             Span::raw(" y").bold(),
             Span::raw(" review now · any other key cancels"),
-        ]),
-    ];
+        ]
+    } else {
+        vec![Span::raw(" any key closes")]
+    };
+    let mut lines = vec![Line::raw(first), Line::raw(format!(" {}", pr.url()))];
+    lines.extend(rest.into_iter().map(Line::raw));
+    lines.extend(claude_line(owed.and_then(|o| o.claude_hold.as_ref()), now));
+    lines.extend([Line::raw(""), Line::from(keys)]);
     render_popup(frame, " Review now ", lines);
 }
 
@@ -1891,6 +1991,7 @@ mod tests {
             status: status.into(),
             profile: "default".into(),
             head_sha: "h1".into(),
+            kind: sanic_core::run::RunKind::Review,
             error: error.map(Into::into),
             no_update: false,
         }
@@ -1913,7 +2014,7 @@ mod tests {
             latest_run: None,
             pending_drafts: 0,
             claude_hold: None,
-            head_reviewed: false,
+            head_runs: sanic_store::HeadRuns::default(),
         }
     }
 
@@ -2137,11 +2238,42 @@ mod tests {
     #[test]
     fn r_asks_before_rerunning_a_failed_or_crashed_review() {
         let mut app = app(false);
-        // The first row's latest run succeeded.
+        let mut revisable = overview();
+        revisable.owed[0].head_runs = sanic_store::HeadRuns {
+            reviewed: true,
+            revisable: true,
+        };
+        app.set_overview(revisable);
+        // The first row's latest run succeeded on its head: revising it
+        // takes an instruction, which only the dashboard asks for.
         press(&mut app, KeyCode::Char('j'));
         press(&mut app, KeyCode::Char('r'));
+        assert_eq!(
+            app.overlay,
+            Some(Overlay::ConfirmRerun {
+                key: pr("org/api", 481),
+                now: ReviewNow::Revise,
+            })
+        );
+        let screen = draw(&mut app, 80, 24).backend().to_string();
+        assert!(
+            screen.contains("Revise that review with an instruction on the"),
+            "{screen}"
+        );
+        // `y` starts nothing; any key closes it.
+        assert_eq!(app.handle_key(key(KeyCode::Char('y'))), Flow::Continue);
         assert_eq!(app.overlay, None);
-        assert!(app.notice.is_some());
+        // Without an agent session there's nothing to revise, as the
+        // dashboard says.
+        let mut bare = app.overview.clone();
+        bare.owed[0].head_runs.revisable = false;
+        let mut sessionless = App::new();
+        sessionless.set_overview(bare);
+        press(&mut sessionless, KeyCode::Char('j'));
+        press(&mut sessionless, KeyCode::Char('r'));
+        let screen = draw(&mut sessionless, 80, 24).backend().to_string();
+        assert!(screen.contains("no agent session to resume"), "{screen}");
+        assert!(!screen.contains("Agent…"), "{screen}");
 
         press(&mut app, KeyCode::End);
         assert_eq!(app.notice, None);
@@ -2150,7 +2282,7 @@ mod tests {
             app.overlay,
             Some(Overlay::ConfirmRerun {
                 key: pr("org/web", 79),
-                why: Why::Failed,
+                now: ReviewNow::Start(Why::Failed),
             })
         );
         insta::assert_snapshot!(draw(&mut app, 80, 24).backend());
@@ -2165,10 +2297,22 @@ mod tests {
         );
         assert_eq!(app.overlay, None);
 
-        // Only from the pane of reviews you owe.
+        // On your own PRs it says why there's nothing to start.
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('r'));
+        let Some(Overlay::ConfirmRerun { now, .. }) = &app.overlay else {
+            panic!("{:?}", app.overlay)
+        };
+        assert_eq!(*now, ReviewNow::Yours);
+        let screen = draw(&mut app, 80, 24).backend().to_string();
+        assert!(screen.contains("It's your own PR"), "{screen}");
+        assert_eq!(app.handle_key(key(KeyCode::Char('y'))), Flow::Continue);
+        // Elsewhere, a hint.
         press(&mut app, KeyCode::Tab);
         press(&mut app, KeyCode::Char('r'));
         assert_eq!(app.overlay, None);
+        assert_eq!(app.notice.as_deref(), Some(RERUN_HINT));
     }
 
     #[test]
@@ -2189,7 +2333,7 @@ mod tests {
             app.overlay,
             Some(Overlay::ConfirmRerun {
                 key: pr("org/web", 82),
-                why: Why::MovedOn,
+                now: ReviewNow::Start(Why::MovedOn),
             })
         );
         let screen = draw(&mut app, 80, 24).backend().to_string();
@@ -2203,7 +2347,20 @@ mod tests {
         app.set_overview(overview);
         press(&mut app, KeyCode::Char('j'));
         press(&mut app, KeyCode::Char('r'));
-        assert_eq!(app.overlay, None);
+        assert_eq!(
+            app.overlay,
+            Some(Overlay::ConfirmRerun {
+                key: pr("org/web", 82),
+                now: ReviewNow::Coming(Coming::Waiting),
+            })
+        );
+        let screen = draw(&mut app, 80, 24).backend().to_string();
+        assert!(screen.contains("A review of h1 of"), "{screen}");
+        assert!(
+            screen.contains("is already waiting for the PR to go quiet."),
+            "{screen}"
+        );
+        assert_eq!(app.handle_key(key(KeyCode::Char('y'))), Flow::Continue);
     }
 
     #[test]
@@ -2567,7 +2724,7 @@ mod tests {
             app.overlay,
             Some(Overlay::ConfirmRerun {
                 key: pr("org/web", 82),
-                why: Why::Skipped(reviewed),
+                now: ReviewNow::Start(Why::Skipped(reviewed)),
             })
         );
         let screen = draw(&mut app, 80, 16).backend().to_string();
@@ -2638,9 +2795,9 @@ mod tests {
             app.overlay,
             Some(Overlay::ConfirmRerun {
                 key: pr("org/api", 490),
-                why: Why::Skipped(Skip::Title {
+                now: ReviewNow::Start(Why::Skipped(Skip::Title {
                     pattern: "build(deps)*".into(),
-                }),
+                })),
             })
         );
         insta::assert_snapshot!(draw(&mut app, 80, 24).backend());
@@ -2694,7 +2851,7 @@ mod tests {
 
     #[test]
     fn a_claude_hold_shows_on_its_row_and_holds_its_queued_review() {
-        let key = pr("org/web", 91);
+        let held = pr("org/web", 91);
         let mut app = App::new();
         app.set_overview(Overview {
             owed: vec![OwedReview {
@@ -2702,7 +2859,7 @@ mod tests {
                 claude_hold: Some(ClaudeHold {
                     findings: vec![ClaudeFinding {
                         finding: Finding::Path("tools/.claude/agents/a.md".into()),
-                        source: key.clone(),
+                        source: held.clone(),
                         head_sha: "h1".into(),
                     }],
                     head: HeadCheck::Done,
@@ -2718,6 +2875,44 @@ mod tests {
             screen.contains("⚠ held for .claude (tools/.claude/agents/a.md)"),
             "{screen}"
         );
+        // `r`'s card warns too.
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(
+            app.overlay,
+            Some(Overlay::ConfirmRerun {
+                key: held.clone(),
+                now: ReviewNow::Start(Why::Held),
+            })
+        );
+        let screen = draw(&mut app, 80, 24).backend().to_string();
+        assert!(
+            screen.contains("⚠ It changes .claude: its skills can run commands as you."),
+            "{screen}"
+        );
+
+        press(&mut app, KeyCode::Esc);
+        // Only waiting for its head's check, it's on its way by itself.
+        let mut overview = app.loaded.clone();
+        overview.owed[0].claude_hold = Some(ClaudeHold {
+            findings: Vec::new(),
+            head: HeadCheck::Pending,
+        });
+        app.set_overview(overview);
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(
+            app.overlay,
+            Some(Overlay::ConfirmRerun {
+                key: held,
+                now: ReviewNow::Coming(Coming::Checking),
+            })
+        );
+        let screen = draw(&mut app, 80, 24).backend().to_string();
+        assert!(
+            screen.contains("is already waiting until its head is checked"),
+            "{screen}"
+        );
+        assert_eq!(app.handle_key(key(KeyCode::Char('y'))), Flow::Continue);
     }
 
     #[test]
@@ -2756,7 +2951,13 @@ mod tests {
         // worker runs by itself: queued, with nothing to start.
         let (row, overlay) = one("ring", "default");
         assert!(row.contains("queued"), "{row}");
-        assert_eq!(overlay, None);
+        assert_eq!(
+            overlay,
+            Some(Overlay::ConfirmRerun {
+                key: pr("org/web", 90),
+                now: ReviewNow::Coming(Coming::Queued),
+            })
+        );
         // Moved out of `ring`: its run is still held, and `r` starts it.
         let (row, overlay) = one("default", "ring");
         assert!(row.contains("held"), "{row}");
@@ -2764,7 +2965,7 @@ mod tests {
             overlay,
             Some(Overlay::ConfirmRerun {
                 key: pr("org/web", 90),
-                why: Why::Held,
+                now: ReviewNow::Start(Why::Held),
             })
         );
     }
@@ -2781,7 +2982,7 @@ mod tests {
             manual.overlay,
             Some(Overlay::ConfirmRerun {
                 key: pr("org/web", 77),
-                why: Why::Held,
+                now: ReviewNow::Start(Why::Held),
             })
         );
         insta::assert_snapshot!(draw(&mut manual, 80, 24).backend());
@@ -2789,6 +2990,24 @@ mod tests {
             manual.handle_key(key(KeyCode::Char('y'))),
             Flow::Request(Request::Rerun(pr("org/web", 77)))
         );
+        // A queued revision isn't held: it's started by hand.
+        let mut revision = manual.loaded.clone();
+        let pr77 = revision
+            .owed
+            .iter_mut()
+            .find(|o| o.key == pr("org/web", 77))
+            .unwrap();
+        pr77.latest_run.as_mut().unwrap().kind = sanic_core::run::RunKind::Regenerate;
+        manual.set_overview(revision);
+        press(&mut manual, KeyCode::Char('r'));
+        assert_eq!(
+            manual.overlay,
+            Some(Overlay::ConfirmRerun {
+                key: pr("org/web", 77),
+                now: ReviewNow::Coming(Coming::Queued),
+            })
+        );
+        assert_eq!(manual.handle_key(key(KeyCode::Char('y'))), Flow::Continue);
 
         // Without the flag, a queued review runs on its own.
         let mut auto = app(false);
@@ -2796,7 +3015,14 @@ mod tests {
             press(&mut auto, KeyCode::Char('j'));
         }
         press(&mut auto, KeyCode::Char('r'));
-        assert_eq!(auto.overlay, None);
+        assert_eq!(
+            auto.overlay,
+            Some(Overlay::ConfirmRerun {
+                key: pr("org/web", 77),
+                now: ReviewNow::Coming(Coming::Queued),
+            })
+        );
+        assert_eq!(auto.handle_key(key(KeyCode::Char('y'))), Flow::Continue);
     }
 
     #[test]

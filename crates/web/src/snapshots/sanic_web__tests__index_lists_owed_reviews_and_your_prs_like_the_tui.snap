@@ -134,7 +134,7 @@ expression: "readable(&f, &page.body)"
 <span>PR</span>
 </div>
 <div class="group-h act">NEEDS YOU · 2</div>
-<div class="ib" data-row data-key="org/repo#7" data-href="/pr/org/repo/7" data-ignore="/pr/org/repo/7/ignore" data-chat="/pr/org/repo/7#chat">
+<div class="ib" data-row data-key="org/repo#7" data-href="/pr/org/repo/7" data-review-now="/pr/org/repo/7/review-now" data-ignore="/pr/org/repo/7/ignore" data-chat="/pr/org/repo/7#chat">
 <span class="n">
 <span class="newdot" title="a review you haven't looked at yet">
 </span>
@@ -323,7 +323,7 @@ and more detail</pre>
 <span>PR</span>
 </div>
 <div class="group-h">READY · 1</div>
-<div class="ib" data-row data-key="org/repo#9" data-href="/pr/org/repo/9">
+<div class="ib" data-row data-key="org/repo#9" data-href="/pr/org/repo/9" data-review-now="/pr/org/repo/9/review-now">
 <span class="n">
 </span>
 <span class="x">
@@ -416,7 +416,7 @@ and more detail</pre>
 <th>
 <kbd>r</kbd>
 </th>
-<td>review now: failed, held or skipped (asks first)</td>
+<td>review now (asks first)</td>
 </tr>
 <tr>
 <th>

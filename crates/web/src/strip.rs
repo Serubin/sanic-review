@@ -18,7 +18,7 @@ use sanic_store::ReviewRun;
 
 use crate::{
     App, Error, Shared,
-    index::{Overview, why},
+    index::{Overview, owed_now},
     page::countdown,
     pr::short,
     pr_href,
@@ -114,7 +114,7 @@ pub struct Drift<'a> {
     pub pr_head: &'a str,
     pub next: Next<'a>,
     now: SystemTime,
-    /// A review of the PR may be started by hand; see [`why`].
+    /// A review of the PR may be started by hand; see [`owed_now`].
     startable: bool,
 }
 
@@ -146,7 +146,7 @@ impl<'a> Drift<'a> {
             pr_head,
             next: Next::of(runs, pr_head, waiting, &overview.manual, claude.as_ref()),
             now: app.clock.now(),
-            startable: owed.and_then(|o| why(o, overview)).is_some(),
+            startable: owed.is_some_and(|o| owed_now(o, overview).starts()),
         })
     }
 

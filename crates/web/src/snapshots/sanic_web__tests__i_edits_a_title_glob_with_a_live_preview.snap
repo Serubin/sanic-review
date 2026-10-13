@@ -106,7 +106,7 @@ expression: "readable(&f, &page.body)"
 <th>
 <kbd>r</kbd>
 </th>
-<td>review now: failed, held or skipped (asks first)</td>
+<td>review now (asks first)</td>
 </tr>
 <tr>
 <th>

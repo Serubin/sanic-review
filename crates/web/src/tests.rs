@@ -1434,11 +1434,12 @@ async fn review_now_asks_first_and_then_asks_serve() {
             .body
             .contains("draft-skipped")
     );
+    // 7's review is of its head: there's only revising it.
     assert!(
         f.get("/pr/org/repo/7/review-now")
             .await
             .body
-            .contains("<h1>Nothing to start</h1>")
+            .contains("<h1>Review org/repo#7 again?")
     );
     assert!(f.serve.started.lock().unwrap().is_empty());
 
@@ -1979,11 +1980,18 @@ async fn prs_by_skipped_authors_are_unlisted_but_their_pages_work() {
     let page = f.get("/pr/org/repo/7").await;
     assert_eq!(page.status, StatusCode::OK);
     assert!(page.body.contains("skipped: author"), "{}", page.body);
+    // Its review is of its head, which `serve` won't queue again: there's
+    // only revising it.
     assert!(
-        page.body
-            .contains(r#"href="/pr/org/repo/7/review-now" data-dialog>Review now"#),
+        !page.body.contains("data-dialog>Review now"),
         "{}",
         page.body
+    );
+    assert!(
+        f.get("/pr/org/repo/7/review-now")
+            .await
+            .body
+            .contains("<h1>Review org/repo#7 again?"),
     );
     assert!(!page.body.contains("Ignore by title"), "{}", page.body);
     assert!(!page.body.contains("data-ignore="), "{}", page.body);
@@ -2000,8 +2008,8 @@ async fn prs_by_skipped_authors_are_unlisted_but_their_pages_work() {
     let ask = f.get("/pr/org/repo/7/review-now").await;
     assert_eq!(ask.status, StatusCode::OK, "{}", ask.body);
     let reply = f.post("/pr/org/repo/7/review-now", &[]).await;
-    assert_eq!(reply.status, StatusCode::SEE_OTHER, "{}", reply.body);
-    assert_eq!(*f.serve.started.lock().unwrap(), [key(7)]);
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    assert!(f.serve.started.lock().unwrap().is_empty());
 
     f.skips.send_replace(skip_rules());
     let index = f.get("/").await.body;
@@ -2852,7 +2860,7 @@ async fn held_goes_by_the_profile_the_run_was_queued_under_not_the_prs() {
     queue_then_move("h2", "default", "ring");
     let row = row_of_8(&f.get("/").await.body);
     assert!(row.contains("it starts when a slot is free"), "{row}");
-    assert!(!row.contains("review-now"), "{row}");
+    assert!(!row.contains("review now "), "{row}");
     let reply = f.post("/pr/org/repo/8/review-now", &[]).await;
     assert_eq!(reply.status, StatusCode::CONFLICT);
 
@@ -2863,7 +2871,7 @@ async fn held_goes_by_the_profile_the_run_was_queued_under_not_the_prs() {
         row.contains(r#"<span class="chip held">held</span>"#),
         "{row}"
     );
-    assert!(row.contains("review-now"), "{row}");
+    assert!(row.contains("review now "), "{row}");
     let reply = f.post("/pr/org/repo/8/review-now", &[]).await;
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
     assert_eq!(*f.serve.started.lock().unwrap(), [key(8)]);
@@ -5503,7 +5511,8 @@ async fn the_strip_follows_a_review_of_the_new_head_until_its_drafts_are_ready()
     let poll = format!("/pr/org/repo/7/runs/{}/strip", f.run);
     let refused = async || {
         let ask = f.get("/pr/org/repo/7/review-now").await.body;
-        assert!(ask.contains("<h1>Nothing to start</h1>"), "{ask}");
+        assert!(ask.contains("</code> is already "), "{ask}");
+        assert!(!ask.contains(r#"id="confirm""#), "{ask}");
         let reply = f.post("/pr/org/repo/7/review-now", &[]).await;
         assert_eq!(reply.status, StatusCode::CONFLICT);
         assert!(f.serve.started.lock().unwrap().is_empty());
@@ -5665,6 +5674,17 @@ async fn the_strip_says_when_the_new_heads_review_waits_on_or_is_held_for_claude
         "{strip}"
     );
     assert!(strip.contains("coming"), "{strip}");
+    // So Review now has nothing to start, and the strip no Start it.
+    assert!(!strip.contains("Start it"), "{strip}");
+    let card = f.get("/pr/org/repo/7/review-now").await.body;
+    assert!(
+        card.contains(
+            "<h1>A review of <code>newer</code> is already waiting until its head is checked \
+             for .claude changes</h1>"
+        ),
+        "{card}"
+    );
+    assert!(!card.contains(r#"id="confirm""#), "{card}");
 
     // Checking it failed: held until you start it, so nothing polls.
     f.store()
@@ -5751,4 +5771,295 @@ async fn the_strip_offers_a_review_outside_the_recency_window() {
     let reply = f.post("/pr/org/repo/7/review-now", &[]).await;
     assert_eq!(reply.status, StatusCode::SEE_OTHER, "{}", reply.body);
     assert_eq!(*f.serve.started.lock().unwrap(), [key(7)]);
+}
+
+#[tokio::test]
+async fn reviewing_an_unchanged_pr_again_revises_its_review_with_your_instruction() {
+    let f = fixture(false).await;
+    let ask = f.get("/pr/org/repo/7/review-now").await;
+    assert_eq!(ask.status, StatusCode::OK);
+    let card = card_of(&ask.body);
+    assert!(
+        card.contains(
+            "<h1>Review org/repo#7 again? It hasn't changed since the review at <code>head7</code>.</h1>"
+        ),
+        "{card}"
+    );
+    assert!(
+        card.contains("so another run is only worth it for what you want looked at differently"),
+        "{card}"
+    );
+    assert!(
+        card.contains(
+            r#"<textarea id="instruction" form="confirm" name="instruction" rows="4" required"#
+        ),
+        "{card}"
+    );
+    let regenerate = format!("/pr/org/repo/7/runs/{}/regenerate", f.run);
+    assert!(
+        card.contains(&format!(
+            r#"<form id="confirm" method="post" action="{regenerate}">"#
+        )),
+        "{card}"
+    );
+    assert!(
+        card.contains("Revise the review<span class=\"k\">y</span>"),
+        "{card}"
+    );
+
+    // Review now's own post starts nothing for it.
+    let reply = f.post("/pr/org/repo/7/review-now", &[]).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT);
+    assert!(
+        reply
+            .body
+            .contains("revise that review with an instruction"),
+        "{}",
+        reply.body
+    );
+    assert!(f.serve.started.lock().unwrap().is_empty());
+    // A blank instruction is refused.
+    let reply = f.post(&regenerate, &[("instruction", "  \r\n")]).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT);
+    assert!(f.serve.revised.lock().unwrap().is_empty());
+    // With one, the review is revised.
+    *f.serve.revision.lock().unwrap() = Some(77);
+    let reply = f
+        .post(
+            &regenerate,
+            &[("instruction", "Look at the error handling.")],
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    assert_eq!(reply.headers[header::LOCATION], "/pr/org/repo/7?run=77");
+    assert_eq!(
+        *f.serve.revised.lock().unwrap(),
+        [(f.run, None, "Look at the error handling.".to_owned())]
+    );
+}
+
+#[tokio::test]
+async fn an_unchanged_review_without_a_session_has_nothing_to_revise() {
+    let f = fixture(false).await;
+    let run = {
+        let mut store = f.store();
+        let request = store.review_request(&key(8)).unwrap().unwrap();
+        let run = store.queue_review(&request).unwrap().unwrap().id;
+        store.claim_run(run).unwrap();
+        run
+    };
+    f.store()
+        .finish_review(
+            run,
+            &ReviewResult {
+                summary: "Fine.".into(),
+                summary_note: None,
+                verdict: Verdict::Comment,
+                comments: vec![],
+                session_id: None,
+                transcript_path: "t".into(),
+                resumed_from: None,
+            },
+        )
+        .unwrap();
+    let card = f.get("/pr/org/repo/8/review-now").await.body;
+    assert!(card.contains("<h1>Review org/repo#8 again?"), "{card}");
+    assert!(card.contains("no agent session to resume"), "{card}");
+    assert!(!card.contains(r#"id="confirm""#), "{card}");
+}
+
+#[tokio::test]
+async fn review_now_says_a_review_is_already_coming_and_links_its_run() {
+    let f = fixture(false).await;
+    let run = {
+        let mut store = f.store();
+        let request = store.review_request(&key(8)).unwrap().unwrap();
+        store.queue_review(&request).unwrap().unwrap().id
+    };
+    let ask = f.get("/pr/org/repo/8/review-now").await.body;
+    let card = card_of(&ask);
+    assert!(
+        card.contains("<h1>A review of <code>head8</code> is already queued</h1>"),
+        "{card}"
+    );
+    assert!(
+        card.contains(&format!(
+            r#"There's nothing to start. <a href="/pr/org/repo/8?run={run}">See its run</a>."#
+        )),
+        "{card}"
+    );
+    assert!(!card.contains(r#"id="confirm""#), "{card}");
+    assert!(card.contains(">Back<"), "{card}");
+    let reply = f.post("/pr/org/repo/8/review-now", &[]).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT);
+    assert!(reply.body.contains("is already queued"), "{}", reply.body);
+    f.store().claim_run(run).unwrap();
+    let ask = f.get("/pr/org/repo/8/review-now").await.body;
+    assert!(ask.contains("is already running</h1>"), "{ask}");
+    assert!(f.serve.started.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn review_now_on_your_own_pr_says_why_there_is_nothing_to_start() {
+    let f = fixture(false).await;
+    // `r` works on every row and page, yours too.
+    let index = f.get("/").await.body;
+    assert!(
+        index.contains(r#"data-review-now="/pr/org/repo/9/review-now""#),
+        "{index}"
+    );
+    let card = f.get("/pr/org/repo/9/review-now").await.body;
+    assert!(card.contains("<h1>Nothing to start</h1>"), "{card}");
+    assert!(
+        card.contains("This is your own PR: nothing here reviews it, and drafting replies to its feedback isn't built yet."),
+        "{card}"
+    );
+    let reply = f.post("/pr/org/repo/9/review-now", &[]).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT);
+    assert!(f.serve.started.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn review_now_starts_a_pr_nothing_has_reviewed_and_not_one_you_dont_owe() {
+    let f = fixture(false).await;
+    f.store()
+        .record(&snapshot(12, "dave", "Fresh"), "me", "default", &[])
+        .unwrap();
+    let card = f.get("/pr/org/repo/12/review-now").await.body;
+    assert!(card.contains("<h1>Review this PR now?</h1>"), "{card}");
+    assert!(card.contains("Spends tokens: a full review"), "{card}");
+    let reply = f.post("/pr/org/repo/12/review-now", &[]).await;
+    assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    assert_eq!(*f.serve.started.lock().unwrap(), [key(12)]);
+
+    // Tracked, but not a review you owe.
+    let other = PrSnapshot {
+        review_requested: false,
+        ..snapshot(13, "erin", "Not yours to review")
+    };
+    f.store().record(&other, "me", "default", &[]).unwrap();
+    let card = f.get("/pr/org/repo/13/review-now").await.body;
+    assert!(card.contains("<h1>Nothing to start</h1>"), "{card}");
+    assert!(card.contains("It isn't a review you owe"), "{card}");
+    let reply = f.post("/pr/org/repo/13/review-now", &[]).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT);
+    assert_eq!(*f.serve.started.lock().unwrap(), [key(12)]);
+}
+
+/// A revision that failed or was cancelled leaves the head with its
+/// succeeded review, which `serve` won't review again: another run is a
+/// revision, starting from the failed one's instruction.
+#[tokio::test]
+async fn a_failed_revision_is_offered_again_not_a_rerun() {
+    let f = fixture(false).await;
+    let revision = {
+        let mut store = f.store();
+        let sanic_store::Regeneration::Queued(run) = store
+            .queue_regeneration(f.run, "Look harder at errors.", |_| false)
+            .unwrap()
+        else {
+            panic!("refused")
+        };
+        store.claim_run(run.id).unwrap();
+        store.fail_run(run.id, "claude exited with 2").unwrap();
+        run.id
+    };
+    let ask = f.get("/pr/org/repo/7/review-now").await.body;
+    let card = card_of(&ask);
+    assert!(card.contains("<h1>Review org/repo#7 again?"), "{card}");
+    assert!(
+        card.contains(
+            r#"Its last revision failed: <span class="error">claude exited with 2</span>"#
+        ),
+        "{card}"
+    );
+    assert!(
+        card.contains(">Look harder at errors.</textarea>"),
+        "{card}"
+    );
+    // It revises the review, not the failed revision.
+    assert!(
+        card.contains(&format!(
+            r#"action="/pr/org/repo/7/runs/{}/regenerate""#,
+            f.run
+        )),
+        "{card}"
+    );
+    assert!(
+        !card.contains(&format!("/runs/{revision}/regenerate")),
+        "{card}"
+    );
+    let reply = f.post("/pr/org/repo/7/review-now", &[]).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT);
+    assert!(f.serve.started.lock().unwrap().is_empty());
+
+    // A draft's revision was about that draft alone: the box starts empty.
+    {
+        let mut store = f.store();
+        let sanic_store::Regeneration::Queued(run) = store
+            .queue_draft_regeneration(f.run, f.drafts[1], "not true", |_| false)
+            .unwrap()
+        else {
+            panic!("refused")
+        };
+        store.cancel_run(run.id).unwrap();
+    }
+    let ask = f.get("/pr/org/repo/7/review-now").await.body;
+    let card = card_of(&ask);
+    assert!(
+        card.contains("Its last revision, of one draft, was cancelled."),
+        "{card}"
+    );
+    assert!(!card.contains("not true"), "{card}");
+    assert!(!card.contains("Its instruction is below"), "{card}");
+}
+
+/// Pressing `r` on a PR is asking: one the recency window leaves off the
+/// lists still starts from its page.
+#[tokio::test]
+async fn review_now_starts_a_review_outside_the_recency_window() {
+    let f = fixture(false).await;
+    let old = PrSnapshot {
+        updated_at: Some("2020-01-01T00:00:00Z".into()),
+        ..fixture_prs().swap_remove(1)
+    };
+    f.store().record(&old, "me", "default", &[]).unwrap();
+    assert!(
+        !f.get("/")
+            .await
+            .body
+            .contains("Fix &lt;script&gt; escaping")
+    );
+    let page = f.get("/pr/org/repo/8").await.body;
+    assert!(
+        page.contains(r#"href="/pr/org/repo/8/review-now" data-dialog>Review now"#),
+        "{page}"
+    );
+    let card = f.get("/pr/org/repo/8/review-now").await.body;
+    assert!(card.contains("<h1>Rerun this review?</h1>"), "{card}");
+    let reply = f.post("/pr/org/repo/8/review-now", &[]).await;
+    assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    assert_eq!(*f.serve.started.lock().unwrap(), [key(8)]);
+}
+
+/// A skipped PR's card says what holds its queued run, as a held one's
+/// does.
+#[tokio::test]
+async fn a_skipped_prs_card_says_what_holds_its_run() {
+    let f = fixture(true).await;
+    {
+        let mut store = f.store();
+        let request = store.review_request(&key(10)).unwrap().unwrap();
+        store.queue_review(&request).unwrap().unwrap();
+    }
+    let card = f.get("/pr/org/repo/10/review-now").await.body;
+    let card = card_of(&card);
+    assert!(
+        card.contains("<h1>Review this draft-skipped PR anyway?</h1>"),
+        "{card}"
+    );
+    assert!(
+        card.contains(r#" · held by <a href="/settings">manual reviews</a>"#),
+        "{card}"
+    );
 }

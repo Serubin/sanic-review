@@ -63,7 +63,7 @@ pub use dashboard::{
     ThreadChoice,
 };
 pub use overview::{
-    Activity, ActivityKind, Decided, LatestRun, MyPr, OwedReview, RowFacts, RunTimes,
+    Activity, ActivityKind, Decided, HeadRuns, LatestRun, MyPr, OwedReview, RowFacts, RunTimes,
 };
 pub use posted::{Posted, draft_span};
 pub use runs::{

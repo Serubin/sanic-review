@@ -137,8 +137,9 @@ reviews of other people's PRs: your own are never checked or held.
   lists what reaches `.claude` (each path, or the link it's under), the
   head that first showed each, a failed check and why it all matters.
   The Review now card says the review is held for its `.claude` changes.
-  The TUI adds a red line under the PR's row saying the same, and
-  `sanic-review chat` prints the warning before it starts. While a queued
+  The TUI adds a red line under the PR's row, and one on its `r` card,
+  saying the same, and `sanic-review chat` prints the warning before it
+  starts. While a queued
   review only waits for its head's check, they say so quietly instead; a
   PR with no review queued shows no check at all.
 
@@ -1167,8 +1168,8 @@ fonttools (run through `uv`, which only this task needs) to
   - failed or crashed: `✗ <new> failed → see why`, linking that run;
   - nothing (none, or cancelled or superseded): `<new> not reviewed`.
 
-  The last two end with Review again, which opens the review-now confirm
-  as Review now does, when one may be started by hand (see Confirms).
+  The last two end with Review again, which opens the review-now card,
+  when that card would start a review (see Review now).
   The strip goes by the PR alone, whatever the recency window, and its
   poll reads only that PR. A PR has moved on only while nothing of its
   head is queued, running or succeeded: a later run of an older head
@@ -1281,10 +1282,51 @@ fonttools (run through `uv`, which only this task needs) to
   to it on GitHub; a failed post's is red. Each is its own page, and from
   the index or a PR page, `r`, the Review now link or Agent… opens that
   page's card as a dialog over the page instead, so you keep your place;
-  see Security. Review now's reasons are the TUI's `r`'s; the moved-on
-  one asks "Review the new head?", says which head the latest review is
-  of, and that it resumes that review when it can. Its post checks the
-  reason again, so it's refused once a review of the head is on its way.
+  see Security.
+- **Review now.** `r` works on every tracked PR, on the index's rows of
+  either list and on its page; the Review now button shows only where
+  it would start a review. Pressing it is asking, so it goes by the PR
+  alone, whatever the recency window: a PR the window leaves off the
+  lists still starts from its page. Its card, the TUI's `r` card worded
+  the same, goes by the PR's state (`sanic_core::start::ReviewNow`):
+  - a review you owe whose latest run failed or crashed, was cancelled,
+    is held, or that's skipped or archived, or that has moved past its
+    latest review, or that nothing has reviewed: asks to start a review
+    ("Rerun this review?", "Review the new head?", "Review this PR
+    now?" and so on), saying what it costs. Held covers both manual
+    reviews and the `.claude` hold, whose card says which, a skipped
+    PR's included, and a PR with
+    a `.claude` hold shows its warning on every branch of the card, the
+    TUI's as a red line;
+  - a review already on its way, waiting out the quiet period, queued
+    (including one that only waits for its head's `.claude` check, which
+    manual reviews don't hold, as the strip has it) or running: "A
+    review of <head> is already <state>", linking its run when there is
+    one, with nothing to start. A held run is still
+    started while a review waits out the quiet period, since manual
+    reviews would only hold that one too;
+  - a review you owe whose head's review succeeded, so nothing has
+    changed since, skipped or not, including one whose latest run is a
+    revision of that review that failed, crashed or was cancelled
+    (`serve` won't review a head again once a review of it succeeded):
+    "Review <owner/name#N> again? It hasn't changed since the review at
+    <head>." Another run is only worth it for something looked at
+    differently, so it takes an instruction, required, in a box, and its
+    button revises that review as Agent… does (see Agent), whose post
+    refuses an empty one. After a failed or cancelled revision it says
+    so, and the box starts with that revision's instruction when it
+    revised the whole review rather than one draft. Without an
+    agent session to resume it says so, with nothing to start. The TUI
+    has no box for text, so its card points to Agent… on the dashboard,
+    or says there's nothing to revise when there's no session;
+  - your own PR: "Nothing to start": nothing reviews it, and drafting
+    replies to its feedback (`respond` runs) isn't built yet;
+  - anything else, such as a tracked PR that isn't a review you owe:
+    "Nothing to start".
+
+  `y` starts a review only on the first, and revises the review on the
+  third, through Agent…'s post. Review now's post decides again, so a
+  stale card is refused unless it would still start a review.
 - **Chat with the reviewer.** A PR page with a review that has an agent
   session ends with a compact card for the run whose drafts it shows, or,
   if that one has no session, the latest that does:
@@ -1605,13 +1647,11 @@ fonttools (run through `uv`, which only this task needs) to
   there. The file is edited in place, keeping comments and layout, and
   written atomically; `serve` picks the change up through its normal
   config reload.
-  `r` on a review you owe whose latest run failed or crashed, that's
-  skipped or archived, that manual reviews are holding, or whose latest
-  run succeeded on a head the PR has since moved past with no review of
-  the new head waiting out the quiet period (moved on), asks for
-  confirmation, since it spends tokens, then starts it: the held run, or
-  a review of the PR's head as last polled, resuming the last review
-  when it can (see `sanic-review review` under Process model). For a
+  `r`, on a PR of either list, shows the card the dashboard's Review now
+  does (see Review now under Dashboard); where that starts a review, `y`
+  starts it: the held run, or a review of the PR's head as last polled,
+  resuming the last review when it can (see `sanic-review review` under
+  Process model), and any other key closes it. For a
   skipped or archived PR that's the way to review it anyway; it stays
   skipped or archived. It goes through the store like any queued review, so
   idempotency applies, and it's logged. It runs right away, even under

@@ -32,7 +32,7 @@ expression: "readable(&f, &page.body)"
 <div class="meta">
 <a class="ref" href="https://github.com/org/repo/pull/7" title="https://github.com/org/repo/pull/7">org/repo#7 ↗</a>
 <span> · alice</span> · <span class="chip ok">drafted</span> · <span class="state act">1 unanswered</span>
-<span class="sp" id="pr-actions" data-ignore="/pr/org/repo/7/ignore" data-chat="#chat">
+<span class="sp" id="pr-actions" data-review-now="/pr/org/repo/7/review-now" data-ignore="/pr/org/repo/7/ignore" data-chat="#chat">
 <a class="btn" href="/pr/org/repo/7/runs/1/regenerate" data-dialog title="Revise this review with the agent, from your instruction">Agent…</a>
 <a class="btn" href="/pr/org/repo/7/ignore">Ignore by title<span class="k">i</span>
 </a>
@@ -366,7 +366,7 @@ expression: "readable(&f, &page.body)"
 <th>
 <kbd>r</kbd>
 </th>
-<td>review now: failed, held or skipped (asks first)</td>
+<td>review now (asks first)</td>
 </tr>
 <tr>
 <th>

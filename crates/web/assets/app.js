@@ -10,7 +10,7 @@
   const page = document.body.dataset.page;
   const help = document.getElementById("help");
   const notice = document.getElementById("notice");
-  const RERUN_HINT = "r reviews a failed, held, skipped, archived or moved-on PR you owe now";
+  const RERUN_HINT = "r reviews the selected PR now";
 
   // Lists you move in: the index's two lists, or a PR page's drafts.
   let focus = 0;

@@ -10,7 +10,8 @@ use sanic_core::{
     repo::RepoName,
     reviewers::{ReviewRecord, Reviewer, SeenHead, reviewers},
     run::RunKind,
-    skip::SkipRules,
+    skip::{Skip, SkipRules},
+    start::{Holding, Owed, ReviewNow},
     state::{Awaiting, Merge, PrState, awaiting},
 };
 
@@ -78,9 +79,8 @@ pub struct OwedReview {
     pub pending_drafts: u32,
     /// Why its reviews never start by themselves, if they don't.
     pub claude_hold: Option<ClaudeHold>,
-    /// A run of its current head is queued, running or succeeded, of any
-    /// kind: a regeneration of an older run doesn't count.
-    pub head_reviewed: bool,
+    /// The runs of its current head.
+    pub head_runs: HeadRuns,
 }
 
 impl OwedReview {
@@ -93,11 +93,14 @@ impl OwedReview {
     /// Whether its latest run is queued and held: `manual` holds it, by
     /// the profile it was queued under, as the worker decides, not the
     /// PR's profile now, which a config change can have moved; or the PR
-    /// has a `.claude` hold.
+    /// has a `.claude` hold. A regeneration is started by hand, so neither
+    /// holds it.
     #[must_use]
     pub fn held(&self, manual: &ManualReviews) -> bool {
         self.latest_run.as_ref().is_some_and(|run| {
-            run.status == "queued" && (manual.holds(&run.profile) || self.claude_hold.is_some())
+            run.status == "queued"
+                && run.kind == RunKind::Review
+                && (manual.holds(&run.profile) || self.claude_hold.is_some())
         })
     }
 
@@ -106,12 +109,66 @@ impl OwedReview {
     /// regeneration of an older run, after its head's review, isn't that.
     #[must_use]
     pub fn behind(&self) -> bool {
-        !self.head_reviewed
+        !self.head_runs.reviewed
             && self
                 .latest_run
                 .as_ref()
                 .is_some_and(|run| run.status == "succeeded" && run.head_sha != self.head_sha)
     }
+
+    /// Whether its latest run is a revision of the review of its current
+    /// head that failed, crashed or was cancelled.
+    #[must_use]
+    pub fn revision_failed(&self) -> bool {
+        self.latest_run.as_ref().is_some_and(|run| {
+            run.kind == RunKind::Regenerate
+                && run.head_sha == self.head_sha
+                && matches!(run.status.as_str(), "failed" | "crashed" | "cancelled")
+        })
+    }
+
+    /// What `r` and Review now offer for it, given why it isn't reviewed
+    /// automatically (`skip`), what `manual` reviews hold, and whether a
+    /// review of it is `waiting` out the quiet period.
+    #[must_use]
+    pub fn review_now(
+        &self,
+        skip: Option<&Skip>,
+        manual: &ManualReviews,
+        waiting: bool,
+    ) -> ReviewNow {
+        // As the dashboard's strip decides: a run that only waits for its
+        // head's check starts by itself, unless manual reviews hold it.
+        let holding = match &self.latest_run {
+            _ if !self.held(manual) => Holding::Nothing,
+            Some(run)
+                if !manual.holds(&run.profile)
+                    && self.claude_hold.as_ref().is_some_and(|h| !h.warns()) =>
+            {
+                Holding::Check
+            }
+            _ => Holding::Held,
+        };
+        ReviewNow::owed(Owed {
+            skip,
+            latest_run: self.latest_status(),
+            holding,
+            behind: self.behind(),
+            waiting,
+            revision_failed: self.revision_failed(),
+        })
+    }
+}
+
+/// What an owed review's current head has had run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HeadRuns {
+    /// A run of it is queued, running or succeeded, of any kind: a
+    /// regeneration of an older run doesn't count.
+    pub reviewed: bool,
+    /// The newest succeeded review of it has an agent session, so
+    /// revising it can resume.
+    pub revisable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +178,8 @@ pub struct LatestRun {
     pub profile: String,
     /// The head it reviews.
     pub head_sha: String,
+    /// A review, or a regeneration revising one.
+    pub kind: RunKind,
     /// Why a failed or crashed run ended.
     pub error: Option<String>,
     /// It succeeded, resuming an earlier run's session, and found nothing
@@ -261,7 +320,12 @@ impl Store {
                     EXISTS (SELECT 1 FROM runs h
                             WHERE h.repo = p.repo AND h.number = p.number
                               AND h.head_sha = p.head_sha
-                              AND h.status IN ('queued', 'running', 'succeeded'))
+                              AND h.status IN ('queued', 'running', 'succeeded')),
+                    latest.kind,
+                    coalesce((SELECT v.session_id IS NOT NULL FROM runs v
+                              WHERE v.repo = p.repo AND v.number = p.number
+                                AND v.head_sha = p.head_sha AND v.status = 'succeeded'
+                              ORDER BY v.queued_at DESC, v.id DESC LIMIT 1), 0)
              FROM prs p
              LEFT JOIN runs latest ON latest.id = (
                  SELECT id FROM runs r
@@ -281,6 +345,7 @@ impl Store {
                     let no_update: bool = row.get(13)?;
                     let run_profile: Option<String> = row.get(14)?;
                     let run_head: Option<String> = row.get(15)?;
+                    let run_kind: Option<String> = row.get(17)?;
                     Ok(OwedReview {
                         key: key_columns(row)?,
                         title: row.get(2)?,
@@ -292,6 +357,11 @@ impl Store {
                             status,
                             profile: run_profile.unwrap_or_default(),
                             head_sha: run_head.unwrap_or_default(),
+                            kind: if run_kind.as_deref() == Some(RunKind::Regenerate.as_str()) {
+                                RunKind::Regenerate
+                            } else {
+                                RunKind::Review
+                            },
                             error,
                             no_update,
                         }),
@@ -302,7 +372,10 @@ impl Store {
                         chat_run: row.get(12)?,
                         state: PrState::default(),
                         claude_hold: None,
-                        head_reviewed: row.get(16)?,
+                        head_runs: HeadRuns {
+                            reviewed: row.get(16)?,
+                            revisable: row.get(18)?,
+                        },
                     })
                 },
             )?
@@ -703,7 +776,7 @@ mod tests {
                 latest_run: None,
                 pending_drafts: 0,
                 claude_hold: None,
-                head_reviewed: false,
+                head_runs: HeadRuns::default(),
             }]
         );
 
@@ -736,6 +809,7 @@ mod tests {
                 status: "crashed".into(),
                 profile: pushed.profile.clone(),
                 head_sha: "h2".into(),
+                kind: RunKind::Review,
                 error: Some("index out of bounds".into()),
                 no_update: false,
             })
@@ -772,7 +846,7 @@ mod tests {
             .unwrap();
         let latest = owed(&store);
         assert_eq!(latest.latest_run.as_ref().unwrap().head_sha, "h1");
-        assert!(latest.head_reviewed);
+        assert!(latest.head_runs.reviewed);
         assert!(!latest.behind());
     }
 
