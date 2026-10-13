@@ -426,10 +426,17 @@ Rules:
 
 - **Debounce.** A trigger fires only after the PR has been quiet for a
   configurable interval. A newer event resets the timer and replaces the
-  queued run.
+  queued run. A review a hold will catch, because manual reviews hold
+  its profile or the PR's changes already reach `.claude` (see The
+  `.claude` hold), isn't debounced: there's nothing to wait for, so it's
+  queued, held, at once, and the strip and Review now show it held, to
+  start by hand. A head not checked for `.claude` yet is debounced as
+  usual, since its check may find nothing.
   Any trigger except `approved` counts as an event. When a newer review
   trigger replaces a pending one, the review runs at the newer head and
-  stays full if either trigger asked for a full review. Once the timer
+  stays full if either trigger asked for a full review; the same goes
+  for a newer review that supersedes one still queued, such as a held
+  one, since that never ran. Once the timer
   fires the run is `queued`; queueing another review of the PR marks a run
   that hasn't started `superseded`. A review already running on a different
   head is stopped: the agent is killed, its worktree removed, and the run
@@ -1153,8 +1160,9 @@ fonttools (run through `uv`, which only this task needs) to
   with no threads either, there's no strip. Once the PR has moved on, it
   starts `Showing <old head>`, whose comments post against that commit,
   then the newest review of the PR's head, or what's coming instead:
-  - waiting out the quiet period: `⟳ <new> waiting for the PR to go
-    quiet (<countdown>)`;
+  - waiting out the quiet period, which a review a hold will catch
+    never does (see Debounce): `⟳ <new> waiting for the PR to go quiet
+    (<countdown>)`;
   - queued: `⟳ <new> queued <how long>`; waiting for its head's
     `.claude` check, unless manual reviews hold it: `⟳ <new> waiting
     until its head is checked for .claude changes`, since it starts by
@@ -1302,9 +1310,9 @@ fonttools (run through `uv`, which only this task needs) to
     (including one that only waits for its head's `.claude` check, which
     manual reviews don't hold, as the strip has it) or running: "A
     review of <head> is already <state>", linking its run when there is
-    one, with nothing to start. A held run is still
-    started while a review waits out the quiet period, since manual
-    reviews would only hold that one too;
+    one, with nothing to start. A review a hold will catch never waits
+    out the quiet period (see Debounce): it's held at once, and offered
+    here as held;
   - a review you owe whose head's review succeeded, so nothing has
     changed since, skipped or not, including one whose latest run is a
     revision of that review that failed, crashed or was cancelled

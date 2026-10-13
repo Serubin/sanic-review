@@ -4,10 +4,12 @@
 //! restarts it, and a later review trigger also replaces the pending
 //! request, so a burst of pushes produces one review of the final head.
 //! When the timer runs out, the store queues the run, which is idempotent
-//! per head SHA and supersedes the PR's run that hasn't started yet.
+//! per head SHA and supersedes the PR's run that hasn't started yet. A
+//! review a hold will catch skips the timer: it's queued, held, at once.
 
 use std::{
     collections::HashMap,
+    ops::ControlFlow,
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
@@ -144,6 +146,17 @@ impl Debouncer {
         self.pending.remove(key);
     }
 
+    /// Removes and returns `key`'s pending request, if any, due or not.
+    pub fn take(&mut self, key: &PrKey) -> Option<ReviewRequest> {
+        self.pending.remove(key).map(|(_, request)| request)
+    }
+
+    /// `key`'s pending request, if any.
+    #[must_use]
+    pub fn pending(&self, key: &PrKey) -> Option<&ReviewRequest> {
+        self.pending.get(key).map(|(_, request)| request)
+    }
+
     #[must_use]
     pub fn due_times(&self) -> DueTimes {
         self.pending
@@ -175,7 +188,8 @@ impl Debouncer {
 /// Debounces `updates` and sends each run the store accepts to `runs`,
 /// publishing pending reviews' due times to `due`. A PR `skips` rules out
 /// when its review comes due is logged and not queued. What `runs`
-/// receives of profiles `manual` holds is held, and it says so itself.
+/// receives of profiles `manual` holds is held, and it says so itself;
+/// a review a hold will catch is queued without the quiet period.
 /// Returns when `updates` closes.
 pub async fn schedule(
     mut updates: mpsc::UnboundedReceiver<Update>,
@@ -193,63 +207,124 @@ pub async fn schedule(
         tokio::select! {
             update = updates.recv() => match update {
                 Some(mut update) => {
-                    let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
-                    let settled = drop_settled_review(&mut update, &mut store);
-                    drop(store);
+                    let mut guard = store.lock().unwrap_or_else(PoisonError::into_inner);
+                    let settled = drop_settled_review(&mut update, &mut guard);
                     if settled {
                         // A request pending for an earlier head is stale:
                         // the PR is back on one that's already reviewed.
                         debouncer.forget(&update.key);
                     }
                     debouncer.offer(&update, Instant::now());
+                    // One a hold will catch has nothing to wait for: it's
+                    // held as soon as it's queued, until you start it.
+                    let held = debouncer
+                        .pending(&update.key)
+                        .is_some_and(|request| will_hold(&manual.borrow(), &guard, request));
+                    let now = held.then(|| debouncer.take(&update.key)).flatten();
+                    drop(guard);
+                    if let Some(request) = now {
+                        debug!(url = %request.key.url(), "a hold would catch it: not debounced");
+                        if queue_request(request, &store, &runs, &skips, &manual, &me).is_break() {
+                            return Ok(());
+                        }
+                    }
                 }
                 None => return Ok(()),
             },
             () = sleep_until(next.unwrap_or_else(Instant::now)), if next.is_some() => {
                 for request in debouncer.take_due(Instant::now()) {
-                    let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
-                    // Checked now rather than when the trigger arrived, so a
-                    // title edit or config reload in the meantime counts.
-                    match skip(&store, &skips.borrow(), &request.key, &me) {
-                        Ok(Some(skip)) => {
-                            info!(url = %request.key.url(), "review skipped: {skip}");
-                            continue;
-                        }
-                        Ok(None) => {}
-                        Err(err) => warn!(
-                            url = %request.key.url(),
-                            "checking whether to skip the review failed: {err:?}"
-                        ),
-                    }
-                    let queued = store.queue_review(&request);
-                    match queued {
-                        Ok(Some(run)) => {
-                            // The hold logs a held one when it arrives.
-                            let held = crate::serve::held_why(&manual.borrow(), &store, &run)
-                                .is_some();
-                            if held {
-                                debug!(url = %request.key.url(), run = run.id, "review queued");
-                            } else {
-                                info!(url = %request.key.url(), run = run.id, "review queued");
-                            }
-                            if runs.send(run).is_err() {
-                                return Ok(());
-                            }
-                        }
-                        Ok(None) => {
-                            debug!(
-                                url = %request.key.url(),
-                                head = %request.head_sha,
-                                "already reviewed"
-                            );
-                        }
-                        Err(err) => warn!(
-                            url = %request.key.url(),
-                            "queueing review failed: {err:?}"
-                        ),
+                    if queue_request(request, &store, &runs, &skips, &manual, &me).is_break() {
+                        return Ok(());
                     }
                 }
             }
+        }
+    }
+}
+
+/// Whether a review of `request` would be held once queued: `manual`
+/// holds its profile, or its PR's changes already reach `.claude`. A head
+/// not checked yet isn't: its check may find nothing, and then it starts
+/// by itself. Held if the store can't say.
+fn will_hold(manual: &ManualReviews, store: &Store, request: &ReviewRequest) -> bool {
+    if manual.holds(&request.profile) {
+        return true;
+    }
+    match store.has_claude_findings(&request.key) {
+        Ok(found) => found,
+        Err(err) => {
+            warn!(
+                url = %request.key.url(),
+                "checking for a `.claude` hold failed, so not debouncing: {err:?}"
+            );
+            true
+        }
+    }
+}
+
+/// Queues `request`, unless `skips` rules it out now, and sends the run
+/// to `runs`. Breaks once `runs` is closed.
+fn queue_request(
+    mut request: ReviewRequest,
+    store: &Mutex<Store>,
+    runs: &mpsc::UnboundedSender<QueuedRun>,
+    skips: &watch::Receiver<SkipRules>,
+    manual: &watch::Receiver<ManualReviews>,
+    me: &str,
+) -> ControlFlow<()> {
+    let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
+    // Checked now rather than when the trigger arrived, so a title edit
+    // or config reload in the meantime counts.
+    match skip(&store, &skips.borrow(), &request.key, me) {
+        Ok(Some(skip)) => {
+            info!(url = %request.key.url(), "review skipped: {skip}");
+            return ControlFlow::Continue(());
+        }
+        Ok(None) => {}
+        Err(err) => warn!(
+            url = %request.key.url(),
+            "checking whether to skip the review failed: {err:?}"
+        ),
+    }
+    // This supersedes the PR's queued review of an older head, which a
+    // hold may have kept since its trigger arrived, so it keeps what that
+    // one asked for, as the debounce would have: it never ran.
+    match store.queued_review(&request.key) {
+        Ok(Some(queued)) if queued.request.head_sha != request.head_sha => {
+            request.trigger = queued.request.trigger.merge(request.trigger);
+        }
+        Ok(_) => {}
+        Err(err) => warn!(
+            url = %request.key.url(),
+            "reading the PR's queued review failed, so not merging with it: {err:?}"
+        ),
+    }
+    match store.queue_review(&request) {
+        Ok(Some(run)) => {
+            // The hold logs a held one when it arrives.
+            let held = crate::serve::held_why(&manual.borrow(), &store, &run).is_some();
+            if held {
+                debug!(url = %request.key.url(), run = run.id, "review queued");
+            } else {
+                info!(url = %request.key.url(), run = run.id, "review queued");
+            }
+            if runs.send(run).is_ok() {
+                ControlFlow::Continue(())
+            } else {
+                ControlFlow::Break(())
+            }
+        }
+        Ok(None) => {
+            debug!(
+                url = %request.key.url(),
+                head = %request.head_sha,
+                "already reviewed"
+            );
+            ControlFlow::Continue(())
+        }
+        Err(err) => {
+            warn!(url = %request.key.url(), "queueing review failed: {err:?}");
+            ControlFlow::Continue(())
         }
     }
 }
@@ -310,7 +385,7 @@ fn skip(store: &Store, rules: &SkipRules, key: &PrKey, me: &str) -> Result<Optio
 
 #[cfg(test)]
 mod tests {
-    use sanic_core::{pr::PrSnapshot, repo::RepoName};
+    use sanic_core::{hold::Finding, pr::PrSnapshot, repo::RepoName};
 
     use super::*;
 
@@ -517,6 +592,95 @@ mod tests {
         drop(tx);
         task.await.unwrap().unwrap();
         assert!(runs.try_recv().is_err());
+    }
+
+    /// A review a hold would catch is queued, held, at once: there's
+    /// nothing to wait for. `findings` are what the PR's changes already
+    /// reach of `.claude`.
+    async fn queued_at_once(manual: ManualReviews, findings: &[Finding]) {
+        let store = store();
+        store
+            .lock()
+            .unwrap()
+            .record_check(&key(1), "b", "h1", Ok(findings))
+            .unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (runs_tx, mut runs) = mpsc::unbounded_channel();
+        let (due_tx, due) = watch::channel(DueTimes::new());
+        let (_skips_tx, skips) = watch::channel(SkipRules::default());
+        let task = tokio::spawn(schedule(
+            rx,
+            store,
+            runs_tx,
+            due_tx,
+            skips,
+            watch::channel(manual).1,
+            "me".into(),
+        ));
+        let start = Instant::now();
+        tx.send(update(1, "h2", vec![push("h1", "h2")])).unwrap();
+        let run = runs.recv().await.unwrap();
+        assert_eq!(start.elapsed(), Duration::ZERO);
+        assert_eq!(run.request.head_sha, "h2");
+        tokio::task::yield_now().await;
+        assert!(
+            due.borrow().is_empty(),
+            "nothing waits out the quiet period"
+        );
+        drop(tx);
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reviews_manual_reviews_hold_skip_the_quiet_period() {
+        queued_at_once(ManualReviews::runner(true), &[]).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reviews_of_prs_held_for_claude_skip_the_quiet_period() {
+        let found = [Finding::Path(".claude/agents/a.md".into())];
+        queued_at_once(ManualReviews::default(), &found).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_held_review_superseded_at_once_keeps_what_it_asked_for() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (runs_tx, mut runs) = mpsc::unbounded_channel();
+        let (due_tx, _due) = watch::channel(DueTimes::new());
+        let (_skips_tx, skips) = watch::channel(SkipRules::default());
+        let task = tokio::spawn(schedule(
+            rx,
+            store(),
+            runs_tx,
+            due_tx,
+            skips,
+            watch::channel(ManualReviews::runner(true)).1,
+            "me".into(),
+        ));
+
+        tx.send(update(1, "h2", vec![push("h1", "h2")])).unwrap();
+        let first = runs.recv().await.unwrap();
+        assert_eq!(
+            first.request.trigger,
+            ReviewTrigger::Push {
+                from_sha: "h1".into()
+            }
+        );
+        // h2 was never reviewed, so the next one still starts from h1.
+        tx.send(update(1, "h3", vec![push("h2", "h3")])).unwrap();
+        let second = runs.recv().await.unwrap();
+        assert_eq!(second.request.head_sha, "h3");
+        assert_eq!(second.request.trigger, first.request.trigger);
+        // And a full review stays full.
+        tx.send(update(1, "h4", vec![requested("h4")])).unwrap();
+        runs.recv().await.unwrap();
+        tx.send(update(1, "h5", vec![push("h4", "h5")])).unwrap();
+        assert_eq!(
+            runs.recv().await.unwrap().request.trigger,
+            ReviewTrigger::Requested
+        );
+        drop(tx);
+        task.await.unwrap().unwrap();
     }
 
     #[tokio::test(start_paused = true)]

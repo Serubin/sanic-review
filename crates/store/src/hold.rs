@@ -85,7 +85,7 @@ impl Store {
         base: &str,
         head: &str,
     ) -> Result<Option<&'static str>> {
-        if self.has_findings(key)? {
+        if self.has_claude_findings(key)? {
             return Ok(Some("its changes reach `.claude`"));
         }
         Ok(match self.head_check(key, base, head)? {
@@ -95,7 +95,9 @@ impl Store {
         })
     }
 
-    fn has_findings(&self, key: &PrKey) -> Result<bool> {
+    /// Whether `key`'s changes reach `.claude`, which holds its reviews
+    /// whatever their head.
+    pub fn has_claude_findings(&self, key: &PrKey) -> Result<bool> {
         Ok(self
             .conn
             .query_row(
