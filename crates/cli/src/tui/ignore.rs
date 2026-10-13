@@ -272,6 +272,7 @@ mod tests {
             latest_run: None,
             pending_drafts: 0,
             claude_hold: None,
+            head_reviewed: false,
         }
     }
 

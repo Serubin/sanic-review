@@ -1104,7 +1104,8 @@ impl App {
     }
 
     /// Asks to confirm a review of the selected PR you owe, if its latest
-    /// run failed or crashed, it's held, or it's skipped or archived.
+    /// run failed or crashed, it's held, it's skipped or archived, or it
+    /// moved past its latest review with nothing on its way.
     fn ask_rerun(&mut self) {
         let selected = self.lists[Pane::Owed.index()]
             .selected()
@@ -1116,7 +1117,8 @@ impl App {
         };
         let skip = self.overview.skipped.get(&pr.key);
         let held = pr.held(&self.overview.manual_reviews);
-        let Some(why) = Why::of(skip, pr.latest_status(), held) else {
+        let moved_on = pr.behind() && !self.overview.waiting.contains_key(&pr.key);
+        let Some(why) = Why::of(skip, pr.latest_status(), held, moved_on) else {
             self.notice = Some(RERUN_HINT.into());
             return;
         };
@@ -1519,7 +1521,7 @@ fn deepest_offset(rows: &[ListItem<'_>], height: u16) -> usize {
     offset
 }
 
-const RERUN_HINT: &str = "r reviews a failed, held, skipped or archived PR you owe now";
+const RERUN_HINT: &str = "r reviews a failed, held, skipped, archived or moved-on PR you owe now";
 
 /// Width of the status column in both PR panes, including the space that
 /// keeps a label as long as the column off what follows it.
@@ -1802,6 +1804,10 @@ fn render_confirm(frame: &mut Frame<'_>, pr: &PrKey, why: &Why) {
             " Start the held review of".into(),
             " now? This spends tokens.",
         ),
+        Why::MovedOn => (
+            " Review the new head of".into(),
+            " resuming its last review if it can? This spends tokens.",
+        ),
     };
     let lines = vec![
         Line::raw(head),
@@ -1884,6 +1890,7 @@ mod tests {
         LatestRun {
             status: status.into(),
             profile: "default".into(),
+            head_sha: "h1".into(),
             error: error.map(Into::into),
             no_update: false,
         }
@@ -1906,6 +1913,7 @@ mod tests {
             latest_run: None,
             pending_drafts: 0,
             claude_hold: None,
+            head_reviewed: false,
         }
     }
 
@@ -2159,6 +2167,41 @@ mod tests {
 
         // Only from the pane of reviews you owe.
         press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(app.overlay, None);
+    }
+
+    #[test]
+    fn r_asks_before_reviewing_a_head_the_pr_moved_on_to() {
+        let mut app = App::new();
+        let mut overview = Overview::default();
+        overview.owed.push(OwedReview {
+            latest_run: Some(LatestRun {
+                head_sha: "h0".into(),
+                ..latest("succeeded", None)
+            }),
+            ..owed("org/web", 82, "Moved on", "erin")
+        });
+        app.set_overview(overview.clone());
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(
+            app.overlay,
+            Some(Overlay::ConfirmRerun {
+                key: pr("org/web", 82),
+                why: Why::MovedOn,
+            })
+        );
+        let screen = draw(&mut app, 80, 24).backend().to_string();
+        assert!(screen.contains("Review the new head of"), "{screen}");
+
+        // Not while a review of the new head waits out the quiet period.
+        let mut app = App::new();
+        overview
+            .waiting
+            .insert(pr("org/web", 82), Duration::from_secs(30));
+        app.set_overview(overview);
+        press(&mut app, KeyCode::Char('j'));
         press(&mut app, KeyCode::Char('r'));
         assert_eq!(app.overlay, None);
     }

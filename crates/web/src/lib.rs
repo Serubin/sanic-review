@@ -26,6 +26,7 @@ mod pr;
 mod queue;
 mod regenerate;
 mod settings;
+mod strip;
 mod submit;
 #[cfg(test)]
 mod tests;
@@ -282,6 +283,10 @@ impl Dashboard {
             .route(
                 "/pr/{owner}/{name}/{number}/runs/{run}/submit",
                 post(submit::submit),
+            )
+            .route(
+                "/pr/{owner}/{name}/{number}/runs/{run}/strip",
+                get(strip::poll),
             )
             .route(
                 "/pr/{owner}/{name}/{number}/runs/{run}/file",

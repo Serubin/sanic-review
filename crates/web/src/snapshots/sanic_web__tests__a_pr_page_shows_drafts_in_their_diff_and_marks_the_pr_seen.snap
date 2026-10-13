@@ -83,11 +83,11 @@ expression: "readable(&f, &page.body)"
 </button>
 </span>
 </form>
-<div class="threads-bar" id="existing">
-<span class="lead">💬</span>
-<span>
-<b>1</b> existing review thread · <b>0</b> overlap your drafts</span>
-<a class="threads-rest" href="#threads">1 thread doesn't overlap a draft</a>
+<div class="strip" id="strip">
+<span class="threads" id="existing">
+<span class="lead">💬 </span>
+<b>1</b> existing review thread · <b>0</b> overlap your drafts · <a class="threads-rest" href="#threads">1 thread doesn't overlap a draft</a>
+</span>
 </div>
 <nav class="views" id="views">
 <a class="cur" href="/pr/org/repo/7?view=drafts" data-view="drafts">Drafts</a>

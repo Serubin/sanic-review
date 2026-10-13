@@ -18,7 +18,9 @@ use sanic_core::{
     state::PrState,
 };
 use sanic_runner::diff::DiffIndex;
-use sanic_store::{DraftRow, DraftStatus, OwedReview, Posted, PrPage, ReviewRun, ThreadChoice};
+use sanic_store::{
+    DraftRow, DraftStatus, LatestRun, OwedReview, Posted, PrPage, ReviewRun, ThreadChoice,
+};
 use serde::Deserialize;
 use tracing::info;
 
@@ -30,7 +32,9 @@ use crate::{
     index::{Overview, archive_form, owed_status, why},
     links, markdown,
     page::{self, Card, Kind, Tone, csrf_field, first_line, keycap, pr_ref, state_cell},
-    pr_href, submit,
+    pr_href,
+    strip::{self, Drift},
+    submit,
     threads::{self, Existing},
 };
 
@@ -128,10 +132,11 @@ pub async fn page(
     );
     let code = threads::Code::new(existing);
     let ask = |thread: &Thread| ask_the_agent(&pr.key, shown.as_ref(), thread);
+    let drift = drift_of(&app, &pr, &runs, shown.as_ref())?;
     let content = html! {
         (pr_header(&app, &header))
         @if let Some(run) = &shown {
-            (drafts_section(&app, &pr, run, &drafts, diff.as_ref(), (&threads, &posted), &views, &revise))
+            (drafts_section(&app, &pr, run, &drafts, diff.as_ref(), (&threads, &posted), &views, &revise, drift.as_ref()))
         } @else if runs.is_empty() {
             p.dim { "No reviews yet." }
         } @else {
@@ -149,6 +154,18 @@ pub async fn page(
         &[crumb(&pr.key)],
         &content,
     ))
+}
+
+/// The strip's head part for `shown`, if the PR has moved past it,
+/// decided from this PR alone, whatever the recency window.
+fn drift_of<'a>(
+    app: &App,
+    pr: &'a PrPage,
+    runs: &'a [ReviewRun],
+    shown: Option<&'a ReviewRun>,
+) -> Result<Option<Drift<'a>>, Error> {
+    let one = Overview::load_pr(app, &pr.key).map_err(Error::pr(&pr.key))?;
+    Ok(shown.and_then(|run| Drift::new(app, &one, &pr.key, runs, run, &pr.head_sha)))
 }
 
 /// A run's stored diff, parsed; `None` if it's gone.
@@ -335,14 +352,6 @@ pub fn short(sha: &str) -> &str {
     sha.get(..8).unwrap_or(sha)
 }
 
-/// What a review of `reviewed` comes with once the PR is at `head`.
-pub fn moved_on(reviewed: &str, head: &str) -> Markup {
-    html! {
-        "Reviewed at " code { (short(reviewed)) } "; the PR has moved on to "
-        code { (short(head)) } ". These comments post against the older commit."
-    }
-}
-
 /// Which view of the drafts the page shows, and the run it was asked
 /// for, which the links to the other view keep.
 struct Views {
@@ -515,6 +524,7 @@ fn drafts_section(
     (threads, posted): (&[Thread], &Posted),
     views: &Views,
     revise: &Revise,
+    drift: Option<&Drift<'_>>,
 ) -> Markup {
     let existing = Existing {
         key: &pr.key,
@@ -571,9 +581,7 @@ fn drafts_section(
                 button.btn.go #preview type="submit" { "Preview the review" (keycap("p")) }
             }
         }
-        @if run.head_sha != pr.head_sha {
-            div.banner { (moved_on(&run.head_sha, &pr.head_sha)) }
-        }
+        (strip::strip(drift, threads::summary(existing, drafts)))
         @if let Some(n) = run.in_progress_comments.filter(|&n| n > 0) {
             p.seen {
                 "The agent saw " (n) " of your pending review "
@@ -591,7 +599,6 @@ fn drafts_section(
         } @else if diff.is_none() {
             div.banner { "This run's diff is gone, so drafts are shown without context." }
         }
-        (threads::summary(existing, drafts))
         // The files view needs the diff.
         @if let Some(diff) = diff { (views.tabs(&pr.key, diff.files().len())) }
         @match (views.shown, diff) {
@@ -599,7 +606,6 @@ fn drafts_section(
                 (files::section(&files::Files {
                     app,
                     run,
-                    pr_head: &pr.head_sha,
                     diff,
                     drafts,
                     existing,
@@ -1245,12 +1251,17 @@ fn held_by(claude: Option<&ClaudeHold>) -> Markup {
 /// What a review started by hand costs.
 const COST: &str = "Spends tokens: a full review of the head as last polled.";
 
+/// What it costs once the PR has moved past its latest review, which it
+/// resumes as a push's review does.
+const RESUME: &str = "Spends tokens: a review of the head as last polled, resuming the last \
+                      review's session if it can, else a full review.";
+
 pub async fn confirm_review_now(
     State(app): State<Shared>,
     Path(path): Path<PrPath>,
 ) -> Result<Markup, Error> {
     let key = path.key()?;
-    let overview = Overview::load(&app).map_err(Error::pr(&key))?;
+    let overview = Overview::load_pr(&app, &key).map_err(Error::pr(&key))?;
     let owed = overview.owed_review(&key);
     let why = owed.and_then(|pr| why(pr, &overview));
     let pr = app
@@ -1264,9 +1275,14 @@ pub async fn confirm_review_now(
         (pr_ref(&key)) " · " (pr.author) " · head " code { (short(&pr.head_sha)) }
         @if why == Some(Why::Held) { (held_by(hold)) }
     };
-    let error = owed
-        .and_then(|pr| pr.latest_run.as_ref())
-        .and_then(|run| Some((run.status.as_str(), run.error.as_deref()?)));
+    let latest = owed.and_then(|pr| pr.latest_run.as_ref());
+    let error = latest.and_then(|run| Some((run.status.as_str(), run.error.as_deref()?)));
+    // As `serve` queues it: see `review_now`.
+    let cost = if owed.is_some_and(OwedReview::behind) {
+        RESUME
+    } else {
+        COST
+    };
     let go = |label: &str| {
         html! {
             form #confirm method="post" action={ (href) "/review-now" } {
@@ -1281,26 +1297,20 @@ pub async fn confirm_review_now(
     let (heading, extra, cost, go) = match &why {
         None => (
             html! { "Nothing to start" },
-            html! {
-                p.note {
-                    "Only a review you owe whose latest run failed or crashed, that's "
-                    "skipped or archived, or that manual reviews are holding, can be "
-                    "started by hand."
-                }
-            },
+            nothing_to_start(),
             None,
             html! {},
         ),
         Some(Why::Skipped(Skip::Reviewed { by, .. })) => (
             html! { "Already reviewed by " (by) ". Review anyway?" },
             html! {},
-            Some(html! { (COST) " It stays skipped for automatic reviews." }),
+            Some(html! { (cost) " It stays skipped for automatic reviews." }),
             go("Review anyway"),
         ),
         Some(Why::Skipped(skip)) => (
             html! { "Review this " (skip.label()) "-skipped PR anyway?" },
             html! {},
-            Some(html! { (COST) " It stays skipped for automatic reviews." }),
+            Some(html! { (cost) " It stays skipped for automatic reviews." }),
             go("Review anyway"),
         ),
         Some(Why::Failed) => (
@@ -1310,20 +1320,26 @@ pub async fn confirm_review_now(
                     div.error { (status) ": " (error) }
                 }
             },
-            Some(html! { (COST) }),
+            Some(html! { (cost) }),
             go("Rerun the review"),
         ),
         Some(Why::Cancelled) => (
             html! { "Review this again? You cancelled its last run." },
             html! {},
-            Some(html! { (COST) }),
+            Some(html! { (cost) }),
             go("Review it again"),
         ),
         Some(Why::Held) => (
             html! { "Start the held review now?" },
             html! {},
-            Some(html! { (COST) }),
+            Some(html! { (cost) }),
             go("Start it"),
+        ),
+        Some(Why::MovedOn) => (
+            html! { "Review the new head?" },
+            moved_on(latest, &pr.head_sha),
+            Some(html! { (cost) }),
+            go("Review the new head"),
         ),
     };
     let content = page::card(&Card {
@@ -1348,6 +1364,30 @@ pub async fn confirm_review_now(
     ))
 }
 
+/// Why the review-now card has nothing to start.
+fn nothing_to_start() -> Markup {
+    html! {
+        p.note {
+            "Only a review you owe whose latest run failed or crashed, that's "
+            "skipped or archived, that manual reviews are holding, or whose "
+            "latest review the PR has moved past with no review of its head on "
+            "its way, can be started by hand."
+        }
+    }
+}
+
+/// Which head the `latest` review is of, now that the PR's is `head`.
+fn moved_on(latest: Option<&LatestRun>, head: &str) -> Markup {
+    html! {
+        @if let Some(run) = latest {
+            p.note {
+                "Its latest review is of " code { (short(&run.head_sha)) }
+                ", and nothing is reviewing " code { (short(head)) } "."
+            }
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ReviewNowForm {
     /// `index` to go back to the index afterwards, as a dialog opened
@@ -1365,7 +1405,7 @@ pub async fn review_now(
 ) -> Result<Redirect, Error> {
     let key = path.key()?;
     // As the confirm page decided, again: it may be stale, or sent twice.
-    let overview = Overview::load(&app).map_err(Error::pr(&key))?;
+    let overview = Overview::load_pr(&app, &key).map_err(Error::pr(&key))?;
     let Some(owed) = overview.owed_review(&key) else {
         return Err(Error::NotFound(format!(
             "{} isn't a tracked review you owe",
@@ -1374,7 +1414,8 @@ pub async fn review_now(
     };
     if why(owed, &overview).is_none() {
         return Err(Error::Refused(format!(
-            "there's nothing to start for {}: its review isn't failed, held or skipped",
+            "there's nothing to start for {}: its review isn't failed, held or skipped, \
+             nor behind the PR's head with nothing on its way",
             key.url()
         )));
     }

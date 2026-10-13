@@ -169,11 +169,15 @@ worktree afterwards. Only the chat prints them; `serve`'s checkouts don't.
 `shell_line()` the line to copy, for the CLI, the TUI and the dashboard.
 
 `sanic-review review <PR url>` asks the running `serve` to review a PR now:
-its held review, or else a full review of its current head, subject to the
+its held review, or else a review of its current head, subject to the
 usual idempotency. It writes a row to a `start_requests` table in the
 shared SQLite database, which `serve` checks every couple of seconds and
 empties as it goes. There's no network listener. A request made while
-`serve` isn't running is handled when it next starts.
+`serve` isn't running is handled when it next starts. The review it starts
+is full, unless the PR's latest run succeeded on an older head: then it's
+queued as a push from that head, so it resumes that review's session when
+it can, as a push's review does (see Triggers). `r` in the TUI and Review
+now on the dashboard start the same.
 
 `serve` watches its config file, and when it's a symlink, say into a
 dotfiles repo, the file it points to as well. Edits from the config
@@ -1114,7 +1118,8 @@ fonttools (run through `uv`, which only this task needs) to
   diff the run reviewed, laid out as GitHub's Files changed tab, and back
   (`f`). The URL says which (`?view=files`), so it's linkable, and a page
   opened without one shows the view this browser last picked. It says
-  which head the diff is at, and when the PR has moved on since. The
+  which head the diff is at; the status strip over both views says when
+  the PR has moved on since. The
   summary and the drafts that aren't on a line of the diff come first;
   every other draft is under the line it ends on, its lines marked, with
   the drafts view's card and controls, and each existing thread on the
@@ -1140,7 +1145,46 @@ fonttools (run through `uv`, which only this task needs) to
   GitHub), with the old file's numbers worked out from the hunks around
   them; when the mirror doesn't have that commit, there's nothing to
   expand.
-- **Existing threads.** Over the drafts, a summary of the PR's review
+- **Status strip.** Under the bar, one line over either view of the
+  drafts says which head they're of and what's become of the PR's since,
+  then sums up its existing review threads (see Existing threads). While
+  the shown run's head is still the PR's, it's only the threads part, and
+  with no threads either, there's no strip. Once the PR has moved on, it
+  starts `Showing <old head>`, whose comments post against that commit,
+  then the newest review of the PR's head, or what's coming instead:
+  - waiting out the quiet period: `⟳ <new> waiting for the PR to go
+    quiet (<countdown>)`;
+  - queued: `⟳ <new> queued <how long>`; waiting for its head's
+    `.claude` check, unless manual reviews hold it: `⟳ <new> waiting
+    until its head is checked for .claude changes`, since it starts by
+    itself if the check finds none; held by the `.claude` hold or manual
+    reviews: `<new> held for its .claude changes · Start it`, `<new>
+    held: checking it for .claude changes failed · Start it` or `<new>
+    held by manual reviews · Start it`, whose Start it opens the
+    review-now confirm when one may be started by hand;
+  - running: `⟳ <new> running <how long>`, since it started;
+  - succeeded: `✓ <new> ready → view it`, linking that run;
+  - failed or crashed: `✗ <new> failed → see why`, linking that run;
+  - nothing (none, or cancelled or superseded): `<new> not reviewed`.
+
+  The last two end with Review again, which opens the review-now confirm
+  as Review now does, when one may be started by hand (see Confirms).
+  The strip goes by the PR alone, whatever the recency window, and its
+  poll reads only that PR. A PR has moved on only while nothing of its
+  head is queued, running or succeeded: a later run of an older head
+  doesn't count.
+  While a review is waiting, queued (not held, or only waiting for its
+  head's check) or running, that part
+  rereads itself every few seconds (`/runs/<id>/strip`, htmx) and the
+  drafts shown are dimmed, though they still take every key and click; an
+  answer that finds nothing on its way comes back without the poll, so
+  it stops, and the dimming, which goes by that part, lifts. Preview then
+  asks first: the preview's page is a confirm card instead, "A review of
+  <new> is running; post against <old> anyway?" (or queued, or waiting
+  as the strip says), whose button goes on to the preview, where
+  Confirm still posts as ever. Nothing is posted or started without a
+  click.
+- **Existing threads.** In the status strip, a summary of the PR's review
   threads says how many there are, how many overlap your drafts, how
   many are resolved, and how many others the drafts shown were posted
   as or posted a reply or 👍 in; the threads no draft overlaps link to
@@ -1237,7 +1281,10 @@ fonttools (run through `uv`, which only this task needs) to
   to it on GitHub; a failed post's is red. Each is its own page, and from
   the index or a PR page, `r`, the Review now link or Agent… opens that
   page's card as a dialog over the page instead, so you keep your place;
-  see Security.
+  see Security. Review now's reasons are the TUI's `r`'s; the moved-on
+  one asks "Review the new head?", says which head the latest review is
+  of, and that it resumes that review when it can. Its post checks the
+  reason again, so it's refused once a review of the head is on its way.
 - **Chat with the reviewer.** A PR page with a review that has an agent
   session ends with a compact card for the run whose drafts it shows, or,
   if that one has no session, the latest that does:
@@ -1559,11 +1606,14 @@ fonttools (run through `uv`, which only this task needs) to
   written atomically; `serve` picks the change up through its normal
   config reload.
   `r` on a review you owe whose latest run failed or crashed, that's
-  skipped or archived, or that manual reviews are holding, asks for
+  skipped or archived, that manual reviews are holding, or whose latest
+  run succeeded on a head the PR has since moved past with no review of
+  the new head waiting out the quiet period (moved on), asks for
   confirmation, since it spends tokens, then starts it: the held run, or
-  a full review of the PR's head as last polled. For a skipped or
-  archived PR that's the way to review it anyway; it stays skipped or
-  archived. It goes through the store like any queued review, so
+  a review of the PR's head as last polled, resuming the last review
+  when it can (see `sanic-review review` under Process model). For a
+  skipped or archived PR that's the way to review it anyway; it stays
+  skipped or archived. It goes through the store like any queued review, so
   idempotency applies, and it's logged. It runs right away, even under
   manual reviews.
   `m` turns manual reviews on, or off, going by what the config file says

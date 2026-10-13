@@ -78,6 +78,9 @@ pub struct OwedReview {
     pub pending_drafts: u32,
     /// Why its reviews never start by themselves, if they don't.
     pub claude_hold: Option<ClaudeHold>,
+    /// A run of its current head is queued, running or succeeded, of any
+    /// kind: a regeneration of an older run doesn't count.
+    pub head_reviewed: bool,
 }
 
 impl OwedReview {
@@ -97,6 +100,18 @@ impl OwedReview {
             run.status == "queued" && (manual.holds(&run.profile) || self.claude_hold.is_some())
         })
     }
+
+    /// Whether its latest run succeeded on a head the PR has since moved
+    /// past, and nothing has reviewed its head or is under way to: a
+    /// regeneration of an older run, after its head's review, isn't that.
+    #[must_use]
+    pub fn behind(&self) -> bool {
+        !self.head_reviewed
+            && self
+                .latest_run
+                .as_ref()
+                .is_some_and(|run| run.status == "succeeded" && run.head_sha != self.head_sha)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,6 +119,8 @@ pub struct LatestRun {
     pub status: String,
     /// The profile it was queued under.
     pub profile: String,
+    /// The head it reviews.
+    pub head_sha: String,
     /// Why a failed or crashed run ended.
     pub error: Option<String>,
     /// It succeeded, resuming an earlier run's session, and found nothing
@@ -222,6 +239,17 @@ impl Store {
     /// With `since`, only those GitHub saw activity on from then on, or
     /// that have no GitHub timestamp stored.
     pub fn owed_reviews(&self, me: &str, since: Option<&str>) -> Result<Vec<OwedReview>> {
+        self.owed(me, since, None)
+    }
+
+    /// `key`, if it's a review you owe, whatever the recency window: a PR
+    /// you act on is one you're looking at.
+    pub fn owed_review(&self, key: &PrKey, me: &str) -> Result<Option<OwedReview>> {
+        Ok(self.owed(me, None, Some(key))?.pop())
+    }
+
+    /// [`Store::owed_reviews`], or with `only`, just that PR.
+    fn owed(&self, me: &str, since: Option<&str>, only: Option<&PrKey>) -> Result<Vec<OwedReview>> {
         let mut stmt = self.conn.prepare_cached(&format!(
             "SELECT p.repo, p.number, p.title, p.author, p.profile, p.is_draft, p.archived,
                     latest.status, latest.error, {pending},
@@ -229,44 +257,55 @@ impl Store {
                         SELECT id FROM runs s
                         WHERE s.repo = p.repo AND s.number = p.number AND s.session_id IS NOT NULL
                         ORDER BY coalesce(s.finished_at, s.queued_at) DESC, s.id DESC LIMIT 1),
-                    latest.no_update IS NOT NULL, latest.profile
+                    latest.no_update IS NOT NULL, latest.profile, latest.head_sha,
+                    EXISTS (SELECT 1 FROM runs h
+                            WHERE h.repo = p.repo AND h.number = p.number
+                              AND h.head_sha = p.head_sha
+                              AND h.status IN ('queued', 'running', 'succeeded'))
              FROM prs p
              LEFT JOIN runs latest ON latest.id = (
                  SELECT id FROM runs r
                  WHERE r.repo = p.repo AND r.number = p.number
                  ORDER BY r.queued_at DESC, r.id DESC LIMIT 1)
-             WHERE {OWED}
+             WHERE {OWED} AND (?3 IS NULL OR (p.repo = ?3 AND p.number = ?4))
              ORDER BY p.repo, p.number",
             pending = pending_drafts()
         ))?;
+        let only_repo = only.map(|key| key.repo.to_string());
         let mut owed = stmt
-            .query_map(params![me, since], |row| {
-                let status: Option<String> = row.get(7)?;
-                let error: Option<String> = row.get(8)?;
-                let no_update: bool = row.get(13)?;
-                let run_profile: Option<String> = row.get(14)?;
-                Ok(OwedReview {
-                    key: key_columns(row)?,
-                    title: row.get(2)?,
-                    author: row.get(3)?,
-                    profile: row.get(4)?,
-                    is_draft: row.get(5)?,
-                    archived: row.get(6)?,
-                    latest_run: status.map(|status| LatestRun {
-                        status,
-                        profile: run_profile.unwrap_or_default(),
-                        error,
-                        no_update,
-                    }),
-                    pending_drafts: row.get(9)?,
-                    body: row.get(10)?,
-                    head_sha: row.get(11)?,
-                    head_reviewers: Vec::new(),
-                    chat_run: row.get(12)?,
-                    state: PrState::default(),
-                    claude_hold: None,
-                })
-            })?
+            .query_map(
+                params![me, since, only_repo, only.map(|key| key.number)],
+                |row| {
+                    let status: Option<String> = row.get(7)?;
+                    let error: Option<String> = row.get(8)?;
+                    let no_update: bool = row.get(13)?;
+                    let run_profile: Option<String> = row.get(14)?;
+                    let run_head: Option<String> = row.get(15)?;
+                    Ok(OwedReview {
+                        key: key_columns(row)?,
+                        title: row.get(2)?,
+                        author: row.get(3)?,
+                        profile: row.get(4)?,
+                        is_draft: row.get(5)?,
+                        archived: row.get(6)?,
+                        latest_run: status.map(|status| LatestRun {
+                            status,
+                            profile: run_profile.unwrap_or_default(),
+                            head_sha: run_head.unwrap_or_default(),
+                            error,
+                            no_update,
+                        }),
+                        pending_drafts: row.get(9)?,
+                        body: row.get(10)?,
+                        head_sha: row.get(11)?,
+                        head_reviewers: Vec::new(),
+                        chat_run: row.get(12)?,
+                        state: PrState::default(),
+                        claude_hold: None,
+                        head_reviewed: row.get(16)?,
+                    })
+                },
+            )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for pr in &mut owed {
             pr.claude_hold = self.claude_hold(&pr.key)?;
@@ -664,6 +703,7 @@ mod tests {
                 latest_run: None,
                 pending_drafts: 0,
                 claude_hold: None,
+                head_reviewed: false,
             }]
         );
 
@@ -695,10 +735,68 @@ mod tests {
             Some(LatestRun {
                 status: "crashed".into(),
                 profile: pushed.profile.clone(),
+                head_sha: "h2".into(),
                 error: Some("index out of bounds".into()),
                 no_update: false,
             })
         );
+    }
+
+    #[test]
+    fn a_pr_is_behind_only_while_nothing_has_reviewed_its_head() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut pr = snapshot(2, "alice");
+        pr.review_requested = true;
+        store.record(&pr, "me", "default", &[]).unwrap();
+        let first = store.queue_review(&request(&pr)).unwrap().unwrap();
+        store.claim_run(first.id).unwrap();
+        store.finish_review(first.id, &result()).unwrap();
+        let owed = |store: &Store| store.owed_review(&pr.key, "me").unwrap().unwrap();
+        assert!(!owed(&store).behind());
+
+        pr.head_sha = "h2".into();
+        store.record(&pr, "me", "default", &[]).unwrap();
+        assert!(owed(&store).behind());
+        let second = store.queue_review(&request(&pr)).unwrap().unwrap();
+        assert!(!owed(&store).behind(), "a review of h2 is queued");
+        store.claim_run(second.id).unwrap();
+        store.finish_review(second.id, &result()).unwrap();
+        // A run of the older head that's newer, as a regeneration of it
+        // would be, doesn't make the PR look moved on.
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET queued_at = '2999-01-01T00:00:00.000Z' WHERE id = ?1",
+                [first.id],
+            )
+            .unwrap();
+        let latest = owed(&store);
+        assert_eq!(latest.latest_run.as_ref().unwrap().head_sha, "h1");
+        assert!(latest.head_reviewed);
+        assert!(!latest.behind());
+    }
+
+    #[test]
+    fn a_review_you_owe_is_found_whatever_the_window() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut pr = snapshot(2, "alice");
+        pr.review_requested = true;
+        pr.updated_at = Some("2020-01-01T00:00:00Z".into());
+        store.record(&pr, "me", "default", &[]).unwrap();
+        assert!(
+            store
+                .owed_reviews("me", Some("2026-01-01T00:00:00Z"))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store.owed_review(&pr.key, "me").unwrap().unwrap().key,
+            pr.key
+        );
+        // Not yours to review: none.
+        let theirs = snapshot(3, "bob");
+        store.record(&theirs, "me", "default", &[]).unwrap();
+        assert!(store.owed_review(&theirs.key, "me").unwrap().is_none());
     }
 
     /// `result`, with comments `bodies` on lines 1, 2, …

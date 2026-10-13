@@ -27,7 +27,7 @@ use sanic_core::{
     hold::HeadCheck,
     manual::ManualReviews,
     pr::PrKey,
-    run::QueuedRun,
+    run::{QueuedRun, ReviewRequest, ReviewTrigger},
     skip::SkipRules,
     trigger::Trigger,
 };
@@ -736,9 +736,9 @@ fn save_layout(sizes: Sizes, store: &Mutex<Store>) {
 
 /// Starts a review of `key` now: its queued review if manual reviews hold
 /// the profile that was queued under, or its PR has a `.claude` hold;
-/// otherwise a full review of its
-/// current head is queued, as the scheduler would, so a head that already
-/// has a queued, running or succeeded review is left alone.
+/// otherwise a review of its current head is queued, as the scheduler
+/// would, so a head that already has a queued, running or succeeded
+/// review is left alone. See [`by_hand`] for which kind.
 fn review_now(key: &PrKey, store: &Mutex<Store>, starter: &Starter) {
     let _span = info_span!("review_now", url = %key.url()).entered();
     let run = {
@@ -750,7 +750,10 @@ fn review_now(key: &PrKey, store: &Mutex<Store>, starter: &Starter) {
         held.and_then(|held| match held {
             Some(run) => Ok(Some(run)),
             None => store.review_request(key).and_then(|req| match req {
-                Some(req) => store.queue_review(&req),
+                Some(req) => {
+                    let req = by_hand(&store, req)?;
+                    store.queue_review(&req)
+                }
                 None => Ok(None),
             }),
         })
@@ -782,6 +785,23 @@ fn review_now(key: &PrKey, store: &Mutex<Store>, starter: &Starter) {
         ),
         Err(err) => warn!(url = %key.url(), "starting the review failed: {err:?}"),
     }
+}
+
+/// `req`, a full review of the PR's head, as a review started by hand
+/// queues it: when the PR's latest run succeeded on an older head, as a
+/// push from that head instead, so it resumes that review's session if it
+/// can, as a push's review does.
+fn by_hand(store: &Store, req: ReviewRequest) -> Result<ReviewRequest> {
+    let latest = store.review_runs(&req.key)?.into_iter().next();
+    Ok(match latest {
+        Some(run) if run.status == "succeeded" && run.head_sha != req.head_sha => ReviewRequest {
+            trigger: ReviewTrigger::Push {
+                from_sha: run.head_sha,
+            },
+            ..req
+        },
+        _ => req,
+    })
 }
 
 /// What [`run_reviews`] takes runs from.
@@ -1392,6 +1412,53 @@ mod tests {
         let store = store.lock().unwrap();
         assert_eq!(store.run(failed.id).unwrap().unwrap().status, "superseded");
         assert!(store.pr_summary(&key).unwrap().unwrap().archived);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_review_the_pr_moved_past_is_started_again_as_a_push() {
+        let key = key();
+        let mut store = store_with_pr(&key);
+        let reviewed = store
+            .queue_review(&store.review_request(&key).unwrap().unwrap())
+            .unwrap()
+            .unwrap();
+        store.claim_run(reviewed.id).unwrap();
+        store
+            .finish_review(
+                reviewed.id,
+                &sanic_core::run::ReviewResult {
+                    summary: "Fine.".into(),
+                    summary_note: None,
+                    verdict: sanic_core::run::Verdict::Comment,
+                    comments: vec![],
+                    session_id: Some("sess".into()),
+                    transcript_path: "t".into(),
+                    resumed_from: None,
+                },
+            )
+            .unwrap();
+        let pushed = PrSnapshot {
+            head_sha: "h2".into(),
+            ..pr_snapshot(&key)
+        };
+        store.record(&pushed, "me", "p", &[]).unwrap();
+        // Checked, and it doesn't change `.claude`.
+        store
+            .record_check(&key, &pushed.base_sha, "h2", Ok(&[]))
+            .unwrap();
+        let store = Arc::new(Mutex::new(store));
+
+        let started = handle(&store, ManualReviews::default(), vec![Request::Rerun(key)]).await;
+        let [run] = &started[..] else {
+            panic!("{started:?}")
+        };
+        assert_eq!(run.request.head_sha, "h2");
+        assert_eq!(
+            run.request.trigger,
+            ReviewTrigger::Push {
+                from_sha: "h1".into()
+            }
+        );
     }
 
     #[tokio::test(start_paused = true)]

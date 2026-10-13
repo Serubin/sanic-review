@@ -30,10 +30,13 @@ use tracing::{info, warn};
 use crate::{
     App, Error, Shared,
     guard::Csrf,
+    index::Overview,
     links,
     markdown::{self, Context},
     page::{self, Card, Kind, Tone, csrf_field, keycap, pr_ref},
-    pr, pr_href, threads,
+    pr, pr_href,
+    strip::Drift,
+    threads,
 };
 
 #[derive(Debug, Deserialize)]
@@ -527,6 +530,10 @@ pub struct PreviewQuery {
     /// An approval's pick; see [`Pick`].
     #[serde(default)]
     pick: String,
+    /// Asked and answered: preview it although a review of the PR's head
+    /// is on its way; see [`on_its_way`].
+    #[serde(default)]
+    anyway: bool,
 }
 
 pub async fn preview(
@@ -534,12 +541,19 @@ pub async fn preview(
     Path(path): Path<RunPath>,
     Query(query): Query<PreviewQuery>,
 ) -> Result<Response, Error> {
-    let PreviewQuery { event, pick } = query;
+    let PreviewQuery {
+        event,
+        pick,
+        anyway,
+    } = query;
     if event == ReviewEvent::Approve && !picked(&app, &pick, path.run) {
         return Err(Error::Refused(PICK_AGAIN.into()));
     }
     let (pr, built) = load(&app, &path, event)?;
     let back = format!("{}?run={}", pr_href(&pr.key), path.run);
+    if !anyway && let Some(card) = on_its_way(&app, &pr, &path, event, &pick, &back)? {
+        return Ok(card.into_response());
+    }
     let built = match built {
         Ok(built) => built,
         Err(why) => {
@@ -626,6 +640,78 @@ pub async fn preview(
         &content,
     )
     .into_response())
+}
+
+/// The soft lock on a run the PR has moved past: while a review of the
+/// PR's head is on its way, a confirm page asking whether to post against
+/// the older commit anyway, which goes on to the preview; `None` while
+/// nothing is.
+fn on_its_way(
+    app: &App,
+    pr: &PrPage,
+    path: &RunPath,
+    event: ReviewEvent,
+    pick: &str,
+    back: &str,
+) -> Result<Option<Markup>, Error> {
+    let key = &pr.key;
+    let runs = app.store().review_runs(key).map_err(Error::pr(key))?;
+    let Some(shown) = runs.iter().find(|run| run.id == path.run) else {
+        return Ok(None);
+    };
+    // The PR's whole overview only once there's a newer head to ask about.
+    if shown.head_sha == pr.head_sha {
+        return Ok(None);
+    }
+    let overview = Overview::load_pr(app, key).map_err(Error::pr(key))?;
+    let Some((drift, state)) = Drift::new(app, &overview, key, &runs, shown, &pr.head_sha)
+        .and_then(|drift| Some((drift, drift.next.coming()?)))
+    else {
+        return Ok(None);
+    };
+    let (old, new) = (pr::short(&drift.shown.head_sha), pr::short(&pr.head_sha));
+    let preview = format!("{}/runs/{}/preview", pr_href(key), path.run);
+    let content = page::card(&Card {
+        kind: "Submit review",
+        heading: html! {
+            "A review of " code { (new) } " is " (state) "; post against "
+            code { (old) } " anyway?"
+        },
+        title: &pr.title,
+        meta: html! { (pr_ref(key)) " · " (pr.author) " · head " code { (new) } },
+        extra: html! {
+            p.note {
+                "These drafts are of " code { (old) } ", and post against it. The review "
+                "on its way may draft something else."
+            }
+        },
+        cost: None,
+        go: html! {
+            form #confirm method="get" action=(preview) {
+                input type="hidden" name="event" value=(event.as_str());
+                @if !pick.is_empty() { input type="hidden" name="pick" value=(pick); }
+                input type="hidden" name="anyway" value="true";
+                button.btn.go type="submit" { "Preview it anyway" (keycap("y")) }
+            }
+        },
+        back: (back, "Back to the drafts"),
+        tone: Tone::Ask,
+    });
+    Ok(Some(page::layout_in(
+        app,
+        Kind::Confirm,
+        "Submit review",
+        &[pr::crumb(key), html! { "submit" }],
+        &content,
+    )))
+}
+
+/// What a review of `reviewed` comes with once the PR is at `head`.
+fn moved_on(reviewed: &str, head: &str) -> Markup {
+    html! {
+        "Reviewed at " code { (pr::short(reviewed)) } "; the PR has moved on to "
+        code { (pr::short(head)) } ". These comments post against the older commit."
+    }
 }
 
 /// The preview's summary line: the verdict, the PR, what's sent and at
@@ -718,7 +804,7 @@ fn checklist(built: &Built, pr: &PrPage, back: &str) -> Markup {
     if let Some(review) = review
         && review.commit_id != pr.head_sha
     {
-        checks.push(pr::moved_on(&review.commit_id, &pr.head_sha));
+        checks.push(moved_on(&review.commit_id, &pr.head_sha));
     }
     if built.in_body > 0 {
         checks.push(html! {

@@ -193,12 +193,13 @@ pub fn lines(draft: &DraftRow) -> Option<(&str, Side, (u32, u32))> {
     Some((path, side, (start, line)))
 }
 
-/// The summary over the drafts: how many existing threads the PR has and
-/// how many overlap a draft, with the ones that don't folded under it,
-/// and how many of the rest the drafts shown were posted as or posted
-/// in, which are with their drafts: one a draft overlaps counts as
-/// overlapping. Nothing when the PR has no review threads.
-pub fn summary(existing: Existing<'_>, drafts: &[DraftRow]) -> Markup {
+/// The threads part of the status strip over the drafts (see
+/// [`crate::strip`]): how many existing threads the PR has and how many
+/// overlap a draft, with a link to the ones that don't, and how many of
+/// the rest the drafts shown were posted as or posted in, which are with
+/// their drafts: one a draft overlaps counts as overlapping. `None` when
+/// the PR has no review threads.
+pub fn summary(existing: Existing<'_>, drafts: &[DraftRow]) -> Option<Markup> {
     let overlapped: HashSet<&str> = drafts
         .iter()
         .flat_map(|d| existing.overlapping(d))
@@ -228,40 +229,37 @@ pub fn summary(existing: Existing<'_>, drafts: &[DraftRow]) -> Markup {
     }
     let threads = overlapping.len() + rest.len();
     if threads == 0 && posted.is_empty() {
-        return html! {};
+        return None;
     }
     let resolved = overlapping
         .iter()
         .chain(&rest)
         .filter(|t| t.resolved)
         .count();
-    html! {
-        div.threads-bar #existing {
-            span.lead { "💬" }
-            span {
-                @if threads > 0 {
-                    b { (threads) } @if threads == 1 { " existing review thread" } @else { " existing review threads" }
-                    " · "
-                    @if overlapping.is_empty() { b { "0" } } @else { b.hot { (overlapping.len()) } }
-                    " overlap" @if overlapping.len() == 1 { "s" } " your drafts"
-                    @if resolved > 0 { " · " (resolved) " resolved" }
-                    @if !posted.is_empty() { " · " }
-                }
-                @if !posted.is_empty() {
-                    b { (posted.len()) } " posted from here"
-                }
+    let hint = (!overlapping.is_empty()).then_some("Each is shown beside the drafts it overlaps.");
+    Some(html! {
+        span.threads #existing title=[hint] {
+            span.lead { "💬 " }
+            @if threads > 0 {
+                b { (threads) } @if threads == 1 { " existing review thread" } @else { " existing review threads" }
+                " · "
+                @if overlapping.is_empty() { b { "0" } } @else { b.hot { (overlapping.len()) } }
+                " overlap" @if overlapping.len() == 1 { "s" } " your drafts"
+                @if resolved > 0 { " · " (resolved) " resolved" }
+                @if !posted.is_empty() { " · " }
             }
-            @if !overlapping.is_empty() {
-                span.dim { "Each is shown beside the drafts it overlaps." }
+            @if !posted.is_empty() {
+                b { (posted.len()) } " posted from here"
             }
             @if !rest.is_empty() {
+                " · "
                 a.threads-rest href="#threads" {
                     (rest.len()) @if rest.len() == 1 { " thread doesn't" } @else { " threads don't" }
                     " overlap a draft"
                 }
             }
         }
-    }
+    })
 }
 
 /// How a thread box is marked out from the others.

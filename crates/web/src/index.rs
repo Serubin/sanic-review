@@ -76,30 +76,8 @@ impl Overview {
             .collect();
         let since = since(app);
         let store = app.store();
-        let owed = store.owed_reviews(&app.me, since.as_deref())?;
-        let (skipped, (owed, unlisted)) = {
-            let skips = app.skips.borrow();
-            let skipped = owed
-                .iter()
-                .filter_map(|pr| {
-                    let facts = PrFacts {
-                        profile: &pr.profile,
-                        title: &pr.title,
-                        author: &pr.author,
-                        is_draft: pr.is_draft,
-                        archived: pr.archived,
-                        head_sha: &pr.head_sha,
-                        head_reviewers: &pr.head_reviewers,
-                        me: &app.me,
-                    };
-                    Some((pr.key.clone(), skips.decide(&facts)?))
-                })
-                .collect();
-            let lists = owed
-                .into_iter()
-                .partition(|pr| !skips.unlisted(&pr.profile, &pr.author));
-            (skipped, lists)
-        };
+        let (skipped, owed, unlisted) =
+            sort_owed(app, store.owed_reviews(&app.me, since.as_deref())?);
         Ok(Self {
             skipped,
             mine: store.my_prs(&app.me, since.as_deref())?,
@@ -107,6 +85,33 @@ impl Overview {
             owed,
             unlisted,
             waiting,
+            facts: HashMap::new(),
+            hidden: Hidden::default(),
+            manual: app.manual_reviews(),
+        })
+    }
+
+    /// [`Overview::load`] for `key` alone, whatever the recency window:
+    /// what a PR's own page, its strip's poll and its Review now decide
+    /// from. Only `owed` (or `unlisted`), `skipped`, `waiting` and
+    /// `manual` are filled in, and only for `key`.
+    pub fn load_pr(app: &App, key: &PrKey) -> Result<Self> {
+        let waiting = app
+            .due
+            .borrow()
+            .get(key)
+            .map(|due| (key.clone(), due.saturating_duration_since(Instant::now())))
+            .into_iter()
+            .collect();
+        let owed = app.store().owed_review(key, &app.me)?;
+        let (skipped, owed, unlisted) = sort_owed(app, owed.into_iter().collect());
+        Ok(Self {
+            owed,
+            unlisted,
+            mine: Vec::new(),
+            waiting,
+            skipped,
+            unseen: HashSet::new(),
             facts: HashMap::new(),
             hidden: Hidden::default(),
             manual: app.manual_reviews(),
@@ -162,6 +167,36 @@ impl Overview {
     }
 }
 
+/// The reviews you owe in `owed`, as the lists sort them: why each that
+/// isn't reviewed automatically isn't, and the listed apart from the
+/// unlisted.
+fn sort_owed(
+    app: &App,
+    owed: Vec<OwedReview>,
+) -> (HashMap<PrKey, Skip>, Vec<OwedReview>, Vec<OwedReview>) {
+    let skips = app.skips.borrow();
+    let skipped = owed
+        .iter()
+        .filter_map(|pr| {
+            let facts = PrFacts {
+                profile: &pr.profile,
+                title: &pr.title,
+                author: &pr.author,
+                is_draft: pr.is_draft,
+                archived: pr.archived,
+                head_sha: &pr.head_sha,
+                head_reviewers: &pr.head_reviewers,
+                me: &app.me,
+            };
+            Some((pr.key.clone(), skips.decide(&facts)?))
+        })
+        .collect();
+    let (owed, unlisted) = owed
+        .into_iter()
+        .partition(|pr| !skips.unlisted(&pr.profile, &pr.author));
+    (skipped, owed, unlisted)
+}
+
 /// The start of the recency window the lists are cut to.
 pub(crate) fn since(app: &App) -> Option<String> {
     window_start(app.clock.now(), app.window.borrow().days())
@@ -206,6 +241,7 @@ pub fn why(pr: &OwedReview, overview: &Overview) -> Option<Why> {
         overview.skipped.get(&pr.key),
         pr.latest_status(),
         pr.held(&overview.manual),
+        pr.behind() && !overview.waiting.contains_key(&pr.key),
     )
 }
 

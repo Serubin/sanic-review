@@ -2121,9 +2121,10 @@ p.seen {
   padding: 0.3rem;
 }
 
-/* The PR's existing review threads: a summary over the drafts, each
-   thread beside the drafts it overlaps and in their diff. */
-.threads-bar {
+/* The status strip over the drafts: the head the shown review is of and
+   what's become of the PR's since, then the PR's existing review threads,
+   each beside the drafts it overlaps and in their diff. */
+.strip {
   border: 1px solid var(--accent);
   border-left-width: 4px;
   border-radius: 6px;
@@ -2136,12 +2137,20 @@ p.seen {
   align-items: baseline;
 }
 
-.threads-bar b.hot {
+.strip > * + *::before {
+  content: "· ";
+  color: var(--dim);
+}
+
+.strip b.hot {
   color: var(--held);
 }
 
-.threads-rest {
-  flex-basis: 100%;
+/* While a review of the PR's head is on its way, the older drafts are
+   dimmed: they still work, and the preview asks first. The strip's poll
+   drops `coming` once it's done, which lifts this. */
+main:has(#run-state.coming) .dc:not(:hover, .selected) {
+  opacity: 0.6;
 }
 
 .threads-rest > summary {

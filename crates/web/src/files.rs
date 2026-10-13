@@ -93,9 +93,6 @@ impl Layout {
 pub struct Files<'a> {
     pub app: &'a App,
     pub run: &'a ReviewRun,
-    /// The PR's head as last polled, which may have moved on from the
-    /// run's.
-    pub pr_head: &'a str,
     pub diff: &'a DiffIndex,
     pub drafts: &'a [DraftRow],
     pub existing: Existing<'a>,
@@ -176,11 +173,9 @@ pub fn section(f: &Files<'_>) -> Markup {
     html! {
         section #drafts .files data-layout=(f.layout.as_str()) data-viewed=(viewed) {
             div.fv-head {
+                // The strip over it says when the PR has moved on.
                 span {
                     "The diff this run reviewed, at " code { (short(&f.run.head_sha)) }
-                    @if f.run.head_sha != f.pr_head {
-                        " · the PR has moved on to " code { (short(f.pr_head)) }
-                    }
                 }
                 span.stats {
                     (f.diff.files().len()) @if f.diff.files().len() == 1 { " file" } @else { " files" }
@@ -745,7 +740,6 @@ pub async fn file(
     let f = Files {
         app: &app,
         run: &loaded.run,
-        pr_head: &loaded.pr_head,
         diff: &loaded.diff,
         drafts: &loaded.drafts,
         existing,
@@ -862,7 +856,6 @@ pub async fn context(
     let f = Files {
         app: &app,
         run: &loaded.run,
-        pr_head: &loaded.pr_head,
         diff: &loaded.diff,
         drafts: &loaded.drafts,
         existing,

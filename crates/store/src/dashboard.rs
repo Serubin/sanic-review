@@ -39,6 +39,11 @@ pub struct ReviewRun {
     pub head_sha: String,
     /// When it was last queued, as the store writes timestamps.
     pub queued_at: String,
+    /// When it started running, if it has.
+    pub started_at: Option<String>,
+    /// The profile it was queued under, which says whether manual reviews
+    /// hold it.
+    pub profile: String,
     pub finished_at: Option<String>,
     /// For a regeneration: the review it revises, and what you asked for.
     pub source_run: Option<i64>,
@@ -283,7 +288,7 @@ impl Store {
             "SELECT id, status, error, suggested_verdict, head_sha, queued_at, finished_at,
                     source_run, instruction, draft_id,
                     (SELECT run_id FROM drafts WHERE drafts.id = runs.draft_id),
-                    in_progress_comments, no_update
+                    in_progress_comments, no_update, started_at, profile
              FROM runs
              WHERE repo = ?1 AND number = ?2 AND kind IN (?3, ?4)
              ORDER BY queued_at DESC, id DESC",
@@ -306,6 +311,8 @@ impl Store {
                         draft_run: row.get(10)?,
                         in_progress_comments: row.get(11)?,
                         no_update: row.get(12)?,
+                        started_at: row.get(13)?,
+                        profile: row.get(14)?,
                     })
                 },
             )?

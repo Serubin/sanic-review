@@ -5377,3 +5377,378 @@ async fn a_threads_code_comes_from_the_reviewed_diff_when_it_has_those_lines() {
     // Nothing was asked of the mirror: it has no file for this commit.
     assert!(!section.contains("table class=\"diff whole\""), "{section}");
 }
+
+/// PR 7, pushed to `head` since the fixture's review of `head7`, which
+/// is checked and found not to change `.claude`.
+fn push_pr7(f: &Fixture, head: &str) {
+    let pushed = PrSnapshot {
+        head_sha: head.into(),
+        ..fixture_prs().swap_remove(0)
+    };
+    let mut store = f.store();
+    store.record(&pushed, "me", "default", &[]).unwrap();
+    store
+        .record_check(&pushed.key, &pushed.base_sha, head, Ok(&[]))
+        .unwrap();
+}
+
+/// Queues a review of PR 7's `head`, as a push from the fixture's.
+fn queue_pr7(f: &Fixture, head: &str) -> i64 {
+    f.store()
+        .queue_review(&ReviewRequest {
+            key: key(7),
+            profile: "default".into(),
+            head_sha: head.into(),
+            base_sha: "base".into(),
+            trigger: ReviewTrigger::Push {
+                from_sha: "head7".into(),
+            },
+        })
+        .unwrap()
+        .unwrap()
+        .id
+}
+
+/// Finishes run `run` with no comments and a session.
+fn finish(f: &Fixture, run: i64) {
+    f.store()
+        .finish_review(
+            run,
+            &ReviewResult {
+                summary: "Fine now.".into(),
+                summary_note: None,
+                verdict: Verdict::Comment,
+                comments: vec![],
+                session_id: Some(format!("sess-{run}")),
+                transcript_path: "t".into(),
+                resumed_from: None,
+            },
+        )
+        .unwrap();
+}
+
+/// The strip over the drafts on the page at `uri`; empty if there's none.
+async fn strip_of(f: &Fixture, uri: &str) -> String {
+    let page = f.get(uri).await.body;
+    let Some(start) = page.find(r#"<div class="strip""#) else {
+        return String::new();
+    };
+    let end = page[start..].find("</div>").unwrap();
+    page[start..start + end].to_owned()
+}
+
+#[tokio::test]
+async fn the_strip_says_the_pr_moved_on_and_offers_reviewing_its_head() {
+    let f = fixture(false).await;
+    // At the PR's head the strip is only the threads.
+    let strip = strip_of(&f, "/pr/org/repo/7").await;
+    assert!(strip.contains(r#"id="existing""#), "{strip}");
+    assert!(!strip.contains("run-state"), "{strip}");
+    // Nothing at all without threads: 8 has none, reviewed again.
+    let again = {
+        let mut store = f.store();
+        let request = store.review_request(&key(8)).unwrap().unwrap();
+        let run = store.queue_review(&request).unwrap().unwrap().id;
+        store.claim_run(run).unwrap();
+        run
+    };
+    finish(&f, again);
+    assert_eq!(strip_of(&f, "/pr/org/repo/8").await, "");
+    assert!(f.get("/pr/org/repo/8").await.body.contains("id=\"drafts\""));
+
+    push_pr7(&f, "newer");
+    let page = f.get("/pr/org/repo/7").await.body;
+    assert!(!page.contains("post against the older commit"), "{page}");
+    let strip = strip_of(&f, "/pr/org/repo/7").await;
+    assert!(
+        strip.contains("Showing <code>head7</code></span> · <span class=\"dim\"><code>newer</code> not reviewed</span>"),
+        "{strip}"
+    );
+    assert!(
+        strip.contains(
+            r#"<a class="linkbtn" data-dialog href="/pr/org/repo/7/review-now">Review again</a>"#
+        ),
+        "{strip}"
+    );
+    // Nothing's on its way, so nothing polls or dims.
+    assert!(!strip.contains("coming"), "{strip}");
+    assert!(!strip.contains("hx-get"), "{strip}");
+    // The header offers it too, as the TUI's `r` does.
+    assert!(page.contains(r#"data-review-now="/pr/org/repo/7/review-now""#));
+
+    let ask = f.get("/pr/org/repo/7/review-now").await.body;
+    let card = card_of(&ask);
+    assert!(card.contains("<h1>Review the new head?</h1>"), "{card}");
+    assert!(
+        card.contains("Its latest review is of <code>head7</code>, and nothing is reviewing <code>newer</code>."),
+        "{card}"
+    );
+    assert!(
+        card.contains("resuming the last review's session if it can"),
+        "{card}"
+    );
+    assert!(
+        card.contains("Review the new head<span class=\"k\">y</span>"),
+        "{card}"
+    );
+    let reply = f.post("/pr/org/repo/7/review-now", &[]).await;
+    assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    assert_eq!(*f.serve.started.lock().unwrap(), [key(7)]);
+}
+
+#[tokio::test]
+async fn the_strip_follows_a_review_of_the_new_head_until_its_drafts_are_ready() {
+    let f = fixture(false).await;
+    push_pr7(&f, "newer");
+    let poll = format!("/pr/org/repo/7/runs/{}/strip", f.run);
+    let refused = async || {
+        let ask = f.get("/pr/org/repo/7/review-now").await.body;
+        assert!(ask.contains("<h1>Nothing to start</h1>"), "{ask}");
+        let reply = f.post("/pr/org/repo/7/review-now", &[]).await;
+        assert_eq!(reply.status, StatusCode::CONFLICT);
+        assert!(f.serve.started.lock().unwrap().is_empty());
+    };
+
+    // Waiting out the quiet period.
+    f.due.send_replace(HashMap::from([(
+        key(7),
+        Instant::now() + Duration::from_secs(90),
+    )]));
+    let strip = strip_of(&f, "/pr/org/repo/7").await;
+    assert!(
+        strip.contains("⟳ <code>newer</code> waiting for the PR to go quiet ("),
+        "{strip}"
+    );
+    assert!(
+        strip.contains(&format!(
+            r#"class="head coming" id="run-state" hx-get="{poll}" hx-trigger="every 5s" hx-swap="outerHTML""#
+        )),
+        "{strip}"
+    );
+    assert!(!strip.contains("Review again"), "{strip}");
+    refused().await;
+    f.due.send_replace(HashMap::new());
+
+    // Queued, then running.
+    let run = queue_pr7(&f, "newer");
+    let strip = strip_of(&f, "/pr/org/repo/7").await;
+    assert!(strip.contains("⟳ <code>newer</code> queued"), "{strip}");
+    assert!(strip.contains("coming"), "{strip}");
+    refused().await;
+    f.store().claim_run(run).unwrap();
+    let started = f.store().review_runs(&key(7)).unwrap()[0]
+        .started_at
+        .clone()
+        .unwrap();
+    *f.clock.0.lock().unwrap() =
+        sanic_core::clock::parse_rfc3339(&started).unwrap() + Duration::from_secs(4 * 60 + 5);
+    let segment = f.get(&poll).await.body;
+    assert!(
+        segment.starts_with(r#"<span class="head coming" id="run-state""#),
+        "{segment}"
+    );
+    assert!(
+        segment.contains(r#"<span class="running">⟳ <code>newer</code> running 4m</span>"#),
+        "{segment}"
+    );
+    refused().await;
+
+    // Done: the poll's answer stops polling and links the new drafts.
+    finish(&f, run);
+    let segment = f.get(&poll).await.body;
+    assert!(
+        segment.starts_with(r#"<span class="head" id="run-state">"#),
+        "{segment}"
+    );
+    assert!(!segment.contains("hx-"), "{segment}");
+    assert!(
+        segment.contains(&format!(
+            r#"<span class="ok">✓ <code>newer</code> ready</span> → <a href="/pr/org/repo/7?run={run}">view it</a>"#
+        )),
+        "{segment}"
+    );
+    // The page itself now shows that run, at the PR's head.
+    let strip = strip_of(&f, "/pr/org/repo/7").await;
+    assert!(!strip.contains("run-state"), "{strip}");
+    // A run that's gone answers empty, which htmx swaps in, so the poll
+    // stops rather than failing every few seconds.
+    let gone = f.get("/pr/org/repo/7/runs/999/strip").await;
+    assert_eq!(gone.status, StatusCode::OK);
+    assert_eq!(gone.body, "");
+}
+
+#[tokio::test]
+async fn the_strip_says_when_the_new_heads_review_failed_or_is_held() {
+    let f = fixture(true).await;
+    accept(&f, 0).await;
+    push_pr7(&f, "newer");
+    let run = queue_pr7(&f, "newer");
+    let strip = strip_of(&f, "/pr/org/repo/7").await;
+    assert!(
+        strip.contains(r#"<span class="held"><code>newer</code> held by manual reviews</span> · <a class="linkbtn" data-dialog href="/pr/org/repo/7/review-now">Start it</a>"#),
+        "{strip}"
+    );
+    // Held isn't on its way by itself: nothing polls, and Preview doesn't ask.
+    assert!(!strip.contains("coming"), "{strip}");
+    let preview = f.get(&f.preview_uri("COMMENT")).await.body;
+    assert!(preview.contains("Post this review?"), "{preview}");
+
+    f.store().claim_run(run).unwrap();
+    f.store().fail_run(run, "claude exited with 1").unwrap();
+    let strip = strip_of(&f, "/pr/org/repo/7").await;
+    assert!(
+        strip.contains(&format!(
+            r#"<span class="bad">✗ <code>newer</code> failed</span> → <a href="/pr/org/repo/7?run={run}">see why</a> · <a class="linkbtn" data-dialog href="/pr/org/repo/7/review-now">Review again</a>"#
+        )),
+        "{strip}"
+    );
+}
+
+#[tokio::test]
+async fn previewing_drafts_of_an_older_head_asks_first_while_its_review_is_on_its_way() {
+    let f = fixture(false).await;
+    accept(&f, 0).await;
+    push_pr7(&f, "newer");
+    // Moved on with nothing coming: straight to the preview.
+    let preview = f.get(&f.preview_uri("COMMENT")).await.body;
+    assert!(preview.contains("Post this review?"), "{preview}");
+
+    let run = queue_pr7(&f, "newer");
+    f.store().claim_run(run).unwrap();
+    // The drafts still work, dimmed.
+    let page = f.get("/pr/org/repo/7").await.body;
+    assert!(page.contains(r#"class="head coming""#), "{page}");
+    assert_eq!(accept(&f, 1).await.status, StatusCode::SEE_OTHER);
+
+    let ask = f.get(&f.preview_uri("COMMENT")).await;
+    assert_eq!(ask.status, StatusCode::OK);
+    assert!(!ask.body.contains("Post this review?"), "{}", ask.body);
+    let card = card_of(&ask.body);
+    assert!(
+        card.contains(
+            "<h1>A review of <code>newer</code> is running; post against <code>head7</code> anyway?</h1>"
+        ),
+        "{card}"
+    );
+    assert!(
+        card.contains(&format!(
+            r#"<form id="confirm" method="get" action="/pr/org/repo/7/runs/{}/preview">"#,
+            f.run
+        )),
+        "{card}"
+    );
+    assert_eq!(hidden_value(card, "anyway"), "true");
+    assert_eq!(hidden_value(card, "event"), "COMMENT");
+    // Nothing is sent from here: the answer is only the preview.
+    let preview = f
+        .get(&format!("{}&anyway=true", f.preview_uri("COMMENT")))
+        .await
+        .body;
+    assert!(preview.contains("Post this review?"), "{preview}");
+    assert!(f.github.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn the_strip_says_when_the_new_heads_review_waits_on_or_is_held_for_claude() {
+    let f = fixture(false).await;
+    // Pushed, its new head not checked yet: the review it queued waits for
+    // the check, then starts by itself.
+    let pushed = PrSnapshot {
+        head_sha: "newer".into(),
+        ..fixture_prs().swap_remove(0)
+    };
+    f.store().record(&pushed, "me", "default", &[]).unwrap();
+    queue_pr7(&f, "newer");
+    let strip = strip_of(&f, "/pr/org/repo/7").await;
+    assert!(
+        strip.contains("⟳ <code>newer</code> waiting until its head is checked for <code>.claude</code> changes"),
+        "{strip}"
+    );
+    assert!(strip.contains("coming"), "{strip}");
+
+    // Checking it failed: held until you start it, so nothing polls.
+    f.store()
+        .record_check(
+            &pushed.key,
+            &pushed.base_sha,
+            "newer",
+            Err("no such commit"),
+        )
+        .unwrap();
+    let strip = strip_of(&f, "/pr/org/repo/7").await;
+    assert!(
+        strip.contains(r#"<span class="held"><code>newer</code> held: checking it for <code>.claude</code> changes failed</span> · <a class="linkbtn" data-dialog href="/pr/org/repo/7/review-now">Start it</a>"#),
+        "{strip}"
+    );
+    assert!(!strip.contains("coming"), "{strip}");
+
+    // It changes `.claude`: held until you start it, so nothing polls.
+    let found = [Finding::Path(".claude/agents/a.md".into())];
+    f.store()
+        .record_check(&pushed.key, &pushed.base_sha, "newer", Ok(&found))
+        .unwrap();
+    let strip = strip_of(&f, "/pr/org/repo/7").await;
+    assert!(
+        strip.contains(r#"<span class="held"><code>newer</code> held for its <code>.claude</code> changes</span> · <a class="linkbtn" data-dialog href="/pr/org/repo/7/review-now">Start it</a>"#),
+        "{strip}"
+    );
+    assert!(!strip.contains("coming"), "{strip}");
+}
+
+#[tokio::test]
+async fn the_strip_says_manual_reviews_hold_a_review_whose_head_is_being_checked() {
+    let f = fixture(true).await;
+    accept(&f, 0).await;
+    let pushed = PrSnapshot {
+        head_sha: "newer".into(),
+        ..fixture_prs().swap_remove(0)
+    };
+    f.store().record(&pushed, "me", "default", &[]).unwrap();
+    queue_pr7(&f, "newer");
+    // It won't start by itself once checked, so it isn't on its way.
+    let strip = strip_of(&f, "/pr/org/repo/7").await;
+    assert!(
+        strip.contains(r#"<span class="held"><code>newer</code> held by manual reviews</span>"#),
+        "{strip}"
+    );
+    assert!(!strip.contains("coming"), "{strip}");
+    let preview = f.get(&f.preview_uri("COMMENT")).await.body;
+    assert!(preview.contains("Post this review?"), "{preview}");
+}
+
+/// The strip, and its poll, go by the PR alone: one the recency window
+/// leaves off the lists still offers a review of its new head.
+#[tokio::test]
+async fn the_strip_offers_a_review_outside_the_recency_window() {
+    let f = fixture(false).await;
+    let old = PrSnapshot {
+        head_sha: "newer".into(),
+        updated_at: Some("2020-01-01T00:00:00Z".into()),
+        ..fixture_prs().swap_remove(0)
+    };
+    {
+        let mut store = f.store();
+        store.record(&old, "me", "default", &[]).unwrap();
+        store
+            .record_check(&old.key, &old.base_sha, "newer", Ok(&[]))
+            .unwrap();
+    }
+    let index = f.get("/").await.body;
+    assert!(!index.contains("Add the thing"), "{index}");
+    let strip = strip_of(&f, "/pr/org/repo/7").await;
+    assert!(strip.contains("Review again</a>"), "{strip}");
+    let segment = f
+        .get(&format!("/pr/org/repo/7/runs/{}/strip", f.run))
+        .await
+        .body;
+    assert!(segment.contains("Review again</a>"), "{segment}");
+    // Where Review again leads goes by the PR alone too.
+    let ask = f.get("/pr/org/repo/7/review-now").await.body;
+    assert!(
+        card_of(&ask).contains("<h1>Review the new head?</h1>"),
+        "{ask}"
+    );
+    let reply = f.post("/pr/org/repo/7/review-now", &[]).await;
+    assert_eq!(reply.status, StatusCode::SEE_OTHER, "{}", reply.body);
+    assert_eq!(*f.serve.started.lock().unwrap(), [key(7)]);
+}
