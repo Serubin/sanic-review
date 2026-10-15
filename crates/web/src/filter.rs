@@ -290,6 +290,24 @@ impl IndexQuery {
         }
     }
 
+    /// This query with `facet`'s picks replaced by `values`, once each.
+    pub fn with_facet(&self, facet: Facet, values: &[&str]) -> Self {
+        let mut filter = self.filter.clone();
+        filter.picked.retain(|(f, _)| *f != facet);
+        for value in values {
+            if !filter.is_picked(facet, value) {
+                filter.picked.push((facet, (*value).to_owned()));
+            }
+        }
+        filter
+            .picked
+            .sort_by_key(|(facet, _)| Facet::ALL.iter().position(|f| f == facet));
+        Self {
+            archived: self.archived,
+            filter,
+        }
+    }
+
     pub fn unfiltered(&self) -> Self {
         Self {
             archived: self.archived,
@@ -409,6 +427,7 @@ pub fn facets(query: &IndexQuery, rows: &[RowValues], me: &str) -> Markup {
                         legend {
                             (facet.label())
                             @if facet == Facet::Author { " " span.dim { "reviews you owe" } }
+                            (toggle(query, facet, &choices))
                         }
                         @for choice in shown { (option(facet, choice)) }
                         @if !more.is_empty() {
@@ -422,6 +441,22 @@ pub fn facets(query: &IndexQuery, rows: &[RowValues], me: &str) -> Markup {
                     }
                 }
             }
+        }
+    }
+}
+
+/// A facet's link that ticks all its values, or unticks them once all are.
+fn toggle(query: &IndexQuery, facet: Facet, choices: &[Choice]) -> Markup {
+    let all = choices.iter().all(|c| c.picked);
+    let values: Vec<&str> = if all {
+        Vec::new()
+    } else {
+        choices.iter().map(|c| c.value.as_str()).collect()
+    };
+    html! {
+        a.fall id={ "facet-all-" (facet.key()) } href=(query.with_facet(facet, &values).href())
+            data-tick=(!all) {
+            @if all { "none" } @else { "all" }
         }
     }
 }
@@ -557,6 +592,37 @@ mod tests {
         assert_eq!(IndexQuery::from_href(Some(&q.href())), q);
         assert_eq!(query("author=&q=+&archived=false").href(), "/");
         assert!(IndexQuery::parse(Some("archived=yes")).is_err());
+    }
+
+    #[test]
+    fn a_facets_toggle_ticks_every_value_then_none() {
+        let rows: Vec<_> = ["alice", "bob", "carol", "dave", "erin", "frank"]
+            .into_iter()
+            .map(|a| row(Side::Owed, Some(a), vec![]))
+            .collect();
+        let toggle_of = |q: &IndexQuery| {
+            let choices = choices(&q.filter, Facet::Author, &rows, "me");
+            toggle(q, Facet::Author, &choices).into_string()
+        };
+        // The sixth author is folded away, and still ticked.
+        let some = query("author=BOB&reviewer=x&q=retry");
+        assert!(toggle_of(&some).contains(
+            "href=\"/?author=alice&amp;author=bob&amp;author=carol&amp;author=dave\
+             &amp;author=erin&amp;author=frank&amp;reviewer=x&amp;q=retry\" data-tick=\"true\">all<"
+        ));
+        let all = query(
+            "author=alice&author=bob&author=carol&author=dave&author=erin&author=frank&q=retry",
+        );
+        assert!(toggle_of(&all).contains("href=\"/?q=retry\" data-tick=\"false\">none<"));
+    }
+
+    #[test]
+    fn ticking_every_reviewer_leaves_out_prs_with_none() {
+        let reviewed = row(Side::Owed, Some("alice"), vec!["carol"]);
+        let unreviewed = row(Side::Owed, Some("bob"), vec![]);
+        let q = query("").with_facet(Facet::Reviewer, &["carol", "CAROL"]);
+        assert_eq!(q.href(), "/?reviewer=carol");
+        assert!(q.filter.matches(&reviewed) && !q.filter.matches(&unreviewed));
     }
 
     #[test]
