@@ -992,6 +992,29 @@
     if (page === "index") keepFilter(shownFilter());
     else homeLinks(document);
   }
+  // A bare `/` reached from another page shows the last filter again; Back,
+  // reload and moves within the index don't, or they'd undo a clear.
+  function restoreFilter() {
+    const nav = window.performance.getEntriesByType("navigation")[0];
+    if (!nav || nav.type !== "navigate") return false;
+    try {
+      const ref = new URL(document.referrer);
+      if (ref.origin === window.location.origin && ref.pathname === "/") return false;
+    } catch (err) {
+      // No referrer: typed, or a bookmark.
+    }
+    const query = lastFilter();
+    if (!query) return false;
+    try {
+      // The index keeps it again; a query it refuses mustn't trap the tab.
+      window.sessionStorage.setItem(FILTER_KEY, "");
+    } catch (err) {
+      // Then nothing was kept to trap it either.
+    }
+    window.location.replace("/?" + query);
+    return true;
+  }
+  if (page === "index" && !window.location.search && restoreFilter()) return;
   recall();
   // The sidebar, its clear links and the refresh all put the filter in
   // the URL this way, as the server spells it. The panes aren't swapped
