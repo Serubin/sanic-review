@@ -38,7 +38,8 @@ expression: "readable(&f, &page.body)"
 <button class="btn fapply" type="submit">Filter</button>
 <div id="facets">
 <fieldset class="facet">
-<legend>Status</legend>
+<legend>Status<a class="fall" id="facet-all-status" href="/?status=needs-you&amp;status=nothing-to-do&amp;status=ready" data-tick="true">all</a>
+</legend>
 <label class="fopt" for="f-status-6e656564732d796f75">
 <input id="f-status-6e656564732d796f75" type="checkbox" name="status" value="needs-you">
 <span class="fv">Needs you</span>
@@ -57,6 +58,7 @@ expression: "readable(&f, &page.body)"
 </fieldset>
 <fieldset class="facet">
 <legend>Author <span class="dim">reviews you owe</span>
+<a class="fall" id="facet-all-author" href="/?author=alice&amp;author=bob&amp;author=carol" data-tick="true">all</a>
 </legend>
 <label class="fopt" for="f-author-616c696365">
 <input id="f-author-616c696365" type="checkbox" name="author" value="alice">
@@ -75,7 +77,8 @@ expression: "readable(&f, &page.body)"
 </label>
 </fieldset>
 <fieldset class="facet">
-<legend>Repo</legend>
+<legend>Repo<a class="fall" id="facet-all-repo" href="/?repo=org%2Frepo" data-tick="true">all</a>
+</legend>
 <label class="fopt" for="f-repo-6f72672f7265706f">
 <input id="f-repo-6f72672f7265706f" type="checkbox" name="repo" value="org/repo">
 <span class="fv">org/repo</span>
@@ -83,7 +86,8 @@ expression: "readable(&f, &page.body)"
 </label>
 </fieldset>
 <fieldset class="facet">
-<legend>State</legend>
+<legend>State<a class="fall" id="facet-all-state" href="/?state=changes-requested&amp;state=mergeable&amp;state=draft-pr&amp;state=unseen" data-tick="true">all</a>
+</legend>
 <label class="fopt" for="f-state-6368616e6765732d726571756573746564">
 <input id="f-state-6368616e6765732d726571756573746564" type="checkbox" name="state" value="changes-requested">
 <span class="fv">changes requested</span>

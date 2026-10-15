@@ -377,6 +377,17 @@ main:has(> #filter) {
   text-transform: uppercase;
   padding: 0;
   margin-bottom: 0.1rem;
+  display: flex;
+  align-items: baseline;
+  gap: 0.3em;
+  width: 100%;
+}
+
+.facet legend .fall {
+  margin-left: auto;
+  font-weight: normal;
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 .facet legend .dim {

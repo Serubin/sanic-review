@@ -1125,6 +1125,18 @@
     }
   });
 
+  // A facet's all/none ticks its boxes in place, folded ones too.
+  document.addEventListener("click", function (e) {
+    const toggle = e.target.closest("a.fall");
+    if (!toggle || !filterForm || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    e.preventDefault();
+    const tick = toggle.dataset.tick === "true";
+    toggle.closest("fieldset").querySelectorAll("input[type=checkbox]").forEach(function (box) {
+      box.checked = tick;
+    });
+    htmx.trigger(filterForm, "change");
+  });
+
   // The filter's sidebar: on a narrow window it starts folded, over the
   // lists; on a wide one it stays open.
   const fold = document.getElementById("filter-fold");

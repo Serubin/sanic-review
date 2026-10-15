@@ -1021,6 +1021,12 @@ fonttools (run through `uv`, which only this task needs) to
     apply. Each value says how many rows it would leave, given the other
     facets and the words. A facet lists its commonest values and folds the
     rest away, apart from the ones picked.
+  - Each facet's `all` ticks every value it lists, folded ones too, and
+    turns to `none` once they're all ticked, which unticks them. All
+    ticked is still a filter, not none: it leaves out the rows with no
+    value for that facet (a PR nobody has reviewed, a row with no State),
+    and a value that turns up later isn't ticked. It's for ticking all
+    but a few.
   - Author filters only the reviews you owe, since your PRs are all
     yours. While an author is picked, Your PRs says so instead of going
     empty.
