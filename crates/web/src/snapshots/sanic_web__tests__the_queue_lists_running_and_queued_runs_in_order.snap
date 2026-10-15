@@ -28,6 +28,10 @@ expression: "readable(&f, &page.body)"
 <main>
 <div id="queue" hx-get="/queue" hx-trigger="every 5s" hx-select="#queue" hx-select-oob="#counts" hx-swap="outerHTML">
 <h1>Queue</h1>
+<p class="qtools">
+<a class="linkbtn" data-dialog href="/queue/clear-stale">clear stale <span class="k">S</span>
+</a>
+</p>
 <ol class="queue">
 <li class="qrow running" id="run-3" data-row data-key="3" data-href="/pr/org/repo/9" data-cancel="/queue/3/cancel">
 <span class="qpos">▶</span>
@@ -85,7 +89,7 @@ expression: "readable(&f, &page.body)"
 <p class="help-foot">
 <span class="k">j</span>
 <span class="k">k</span> move · <span class="k">K</span>
-<span class="k">J</span> move a queued run up, down · <span class="k">c</span> cancel · <span class="k">Enter</span> open the PR · <span class="k">?</span> keys</p>
+<span class="k">J</span> move a queued run up, down · <span class="k">c</span> cancel · <span class="k">S</span> clear stale · <span class="k">Enter</span> open the PR · <span class="k">?</span> keys</p>
 </div>
 </main>
 <div class="overlay" id="help" hidden>
@@ -157,6 +161,12 @@ expression: "readable(&f, &page.body)"
 <kbd>c</kbd>
 </th>
 <td>in the queue: cancel the selected run (asks first)</td>
+</tr>
+<tr>
+<th>
+<kbd>S</kbd>
+</th>
+<td>in the queue: drop reviews of closed, reviewed or no-longer-yours PRs (asks first)</td>
 </tr>
 <tr>
 <th>

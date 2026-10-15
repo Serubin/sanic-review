@@ -51,6 +51,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0025_run_queue.sql"),
     include_str!("migrations/0026_thread_diff_hunk.sql"),
     include_str!("migrations/0027_claude_hold.sql"),
+    include_str!("migrations/0028_run_by_hand.sql"),
 ];
 
 /// How long a write waits for another connection's write to finish.
@@ -68,7 +69,7 @@ pub use overview::{
 pub use posted::{Posted, draft_span};
 pub use runs::{
     Cancelled, Direction, Draft, Moved, QueueEntry, Refusal, Regeneration, RunCounts, RunRecord,
-    SessionRun,
+    SessionRun, Stale,
 };
 
 /// A connection to the database. The poller and the runner each open their

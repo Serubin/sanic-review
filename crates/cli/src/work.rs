@@ -166,6 +166,26 @@ pub fn supersede_unlisted(store: &mut Store, skips: &SkipRules, was: Option<&Ski
     }
 }
 
+/// Supersedes the queued reviews of PRs that are
+/// [`Stale`](sanic_store::Stale) for `me`, of `only` if given. Failing is
+/// logged, not fatal.
+pub fn supersede_stale(store: &mut Store, me: &str, only: Option<&PrKey>) {
+    match store.supersede_stale_reviews(me, only) {
+        Ok(dropped) => {
+            for (key, why) in &dropped {
+                info!(url = %key.url(), "queued review superseded: {why}");
+            }
+        }
+        Err(err) => {
+            if let Some(key) = only {
+                warn!(url = %key.url(), "superseding a stale queued review failed: {err:?}");
+            } else {
+                warn!("superseding stale queued reviews failed: {err:?}");
+            }
+        }
+    }
+}
+
 impl Worker {
     pub fn new(data_dir: &Path, store: Arc<Mutex<Store>>, config: &Config, me: &str) -> Self {
         Self {
@@ -292,6 +312,11 @@ impl Worker {
             &settings.git_url,
             settings.reference_dirs.clone(),
         ))
+    }
+
+    /// The GitHub login everything is judged relative to.
+    pub fn me(&self) -> &str {
+        &self.me
     }
 
     fn store(&self) -> MutexGuard<'_, Store> {

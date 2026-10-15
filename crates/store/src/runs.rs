@@ -191,6 +191,60 @@ pub enum Cancelled {
     NoSuchRun,
 }
 
+/// Why a PR's queued review is no longer wanted; see
+/// [`Store::supersede_stale_reviews`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stale {
+    /// A refresh found it closed, merged or gone.
+    Closed,
+    /// You wrote it.
+    Mine,
+    /// Your review request was withdrawn and you never reviewed it.
+    NotReviewer,
+    /// Someone other than its author or a bot reviewed its current head.
+    Reviewed,
+}
+
+impl Stale {
+    fn parse(code: &str) -> Option<Self> {
+        match code {
+            "closed" => Some(Self::Closed),
+            "mine" => Some(Self::Mine),
+            "not_reviewer" => Some(Self::NotReviewer),
+            "reviewed" => Some(Self::Reviewed),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for Stale {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Closed => "closed",
+            Self::Mine => "authored by you",
+            Self::NotReviewer => "review request withdrawn",
+            Self::Reviewed => "head already reviewed",
+        })
+    }
+}
+
+/// [`Stale`]'s code for the `prs` row `p` when the user is `?1`, or NULL.
+/// An empty COMMENTED review is how a thread reply is stored, so it doesn't
+/// count as reviewing.
+const STALE: &str = "CASE
+    WHEN EXISTS (SELECT 1 FROM closed_prs c WHERE c.repo = p.repo AND c.number = p.number)
+        THEN 'closed'
+    WHEN lower(p.author) = lower(?1) THEN 'mine'
+    WHEN NOT p.reviewer THEN 'not_reviewer'
+    WHEN EXISTS (
+        SELECT 1 FROM reviews v
+        WHERE v.repo = p.repo AND v.number = p.number AND v.commit_sha = p.head_sha
+              AND NOT v.by_bot AND lower(v.author) != lower(p.author)
+              AND (v.state IN ('APPROVED', 'CHANGES_REQUESTED')
+                   OR (v.state = 'COMMENTED' AND trim(v.body, ' ' || char(9, 10, 13)) != ''))
+    ) THEN 'reviewed'
+END";
+
 /// A run whose agent session can be resumed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRun {
@@ -309,6 +363,26 @@ impl Store {
     /// PR that hasn't started. `None` if this head is already queued,
     /// running or reviewed; a failed or superseded run of it is requeued.
     pub fn queue_review(&mut self, req: &ReviewRequest) -> Result<Option<QueuedRun>> {
+        self.queue_by(req, false)
+    }
+
+    /// [`Store::queue_review`] for a review you started, which
+    /// [`Store::supersede_stale_reviews`] leaves alone.
+    pub fn queue_review_by_hand(&mut self, req: &ReviewRequest) -> Result<Option<QueuedRun>> {
+        self.queue_by(req, true)
+    }
+
+    /// Marks queued run `id` as started by hand; see
+    /// [`Store::queue_review_by_hand`]. `false` if it's no longer queued.
+    pub fn mark_by_hand(&self, id: i64) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE runs SET by_hand = 1 WHERE id = ?1 AND status = 'queued'",
+            [id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    fn queue_by(&mut self, req: &ReviewRequest, by_hand: bool) -> Result<Option<QueuedRun>> {
         let repo = req.key.repo.to_string();
         let number = req.key.number;
         let key = req.idempotency_key();
@@ -352,7 +426,7 @@ impl Store {
                          status = 'queued', error = NULL, suggested_verdict = NULL,
                          session_id = NULL, transcript_path = NULL, resumed_from = NULL,
                          worktree_run = NULL, no_update = NULL, queue_pos = ?6,
-                         queued_at = {NOW}, started_at = NULL, finished_at = NULL
+                         queued_at = {NOW}, started_at = NULL, finished_at = NULL, by_hand = ?7
                      WHERE id = ?1"
                 ),
                 params![
@@ -361,7 +435,8 @@ impl Store {
                     req.profile,
                     req.base_sha,
                     from_sha,
-                    pos
+                    pos,
+                    by_hand
                 ],
             )?;
             id
@@ -369,8 +444,8 @@ impl Store {
             tx.execute(
                 &format!(
                     "INSERT INTO runs (repo, number, kind, trigger, idem_key, profile, head_sha,
-                                       base_sha, from_sha, status, queue_pos, queued_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued', ?10, {NOW})"
+                                       base_sha, from_sha, status, queue_pos, queued_at, by_hand)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued', ?10, {NOW}, ?11)"
                 ),
                 params![
                     repo,
@@ -382,7 +457,8 @@ impl Store {
                     req.head_sha,
                     req.base_sha,
                     from_sha,
-                    pos
+                    pos,
+                    by_hand
                 ],
             )?;
             tx.last_insert_rowid()
@@ -1250,6 +1326,84 @@ impl Store {
         Ok(keys)
     }
 
+    /// Supersedes every review queued but not started of a PR that's
+    /// [`Stale`] for `me` as last polled, of `only` if given, except those
+    /// started by hand. Returns each PR it touched, once, with why.
+    pub fn supersede_stale_reviews(
+        &mut self,
+        me: &str,
+        only: Option<&PrKey>,
+    ) -> Result<Vec<(PrKey, Stale)>> {
+        let (repo, number) = only.map(|k| (k.repo.to_string(), k.number)).unzip();
+        // Immediate: it reads before it writes, alongside other connections.
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let stale: Vec<(i64, String, u32, String)> = {
+            let mut stmt = tx.prepare_cached(&format!(
+                "SELECT r.id, r.repo, r.number, {STALE} AS why
+                 FROM runs r JOIN prs p ON p.repo = r.repo AND p.number = r.number
+                 WHERE r.status = 'queued' AND r.kind = ?2 AND NOT r.by_hand
+                       AND (?3 IS NULL OR (r.repo = ?3 AND r.number = ?4))
+                       AND why IS NOT NULL
+                 ORDER BY r.repo, r.number, r.id"
+            ))?;
+            stmt.query_map(params![me, REVIEW, repo, number], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?
+        };
+        let mut dropped: Vec<(PrKey, Stale)> = Vec::new();
+        for (id, repo, number, why) in stale {
+            tx.execute(
+                &format!(
+                    "UPDATE runs SET status = 'superseded', finished_at = {NOW}, queue_pos = NULL
+                     WHERE id = ?1 AND status = 'queued'"
+                ),
+                [id],
+            )?;
+            let Some(why) = Stale::parse(&why) else {
+                bail!("unknown stale reason {why:?}");
+            };
+            let key = PrKey {
+                repo: RepoName::parse(&repo)?,
+                number,
+            };
+            if dropped.last().is_none_or(|(last, _)| *last != key) {
+                dropped.push((key, why));
+            }
+        }
+        tx.commit().wrap_err("superseding stale queued reviews")?;
+        Ok(dropped)
+    }
+
+    /// How many reviews [`Store::supersede_stale_reviews`] would supersede
+    /// for `me` now.
+    pub fn stale_review_count(&self, me: &str) -> Result<u32> {
+        Ok(self.conn.query_row(
+            &format!(
+                "SELECT count(*) FROM runs r JOIN prs p ON p.repo = r.repo AND p.number = r.number
+                 WHERE r.status = 'queued' AND r.kind = ?2 AND NOT r.by_hand
+                       AND ({STALE}) IS NOT NULL"
+            ),
+            params![me, REVIEW],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Why `key` is [`Stale`] for `me` as last polled, if it is.
+    pub fn stale_reason(&self, key: &PrKey, me: &str) -> Result<Option<Stale>> {
+        let code: Option<Option<String>> = self
+            .conn
+            .query_row(
+                &format!("SELECT {STALE} FROM prs p WHERE p.repo = ?2 AND p.number = ?3"),
+                params![me, key.repo.to_string(), key.number],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(code.flatten().as_deref().and_then(Stale::parse))
+    }
+
     /// How many [`Store::queued_reviews`] there are of PRs whose profile,
     /// as each was queued, is `counted`, leaving out PRs with a `.claude`
     /// hold: what turning manual reviews off for those profiles starts.
@@ -2089,7 +2243,7 @@ fn queued_row(row: &Row<'_>) -> rusqlite::Result<QueuedRow> {
 #[cfg(test)]
 mod tests {
     use sanic_core::{
-        pr::PrSnapshot,
+        pr::{PrSnapshot, Review, ReviewState},
         run::{Confidence, DraftComment, InlineComment, Severity, Side, Verdict},
         skip::SkipRules,
     };
@@ -3245,6 +3399,140 @@ mod tests {
         assert_eq!(status(&store, running.id), "running");
         assert_eq!(queued_ids(&store), [kept.id, elsewhere.id]);
         assert!(store.supersede_queued_reviews(unlisted).unwrap().is_empty());
+    }
+
+    fn head_review(id: &str, author: &str, state: ReviewState, body: &str) -> Review {
+        Review {
+            id: id.into(),
+            author: author.into(),
+            state,
+            body: body.into(),
+            submitted_at: "2026-01-03T00:00:00Z".into(),
+            commit: Some("h1".into()),
+            by_bot: false,
+        }
+    }
+
+    #[test]
+    fn stale_queued_reviews_are_superseded() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut queue = |number: u32, edit: &dyn Fn(&mut PrSnapshot)| {
+            let mut snap = snapshot();
+            snap.key.number = number;
+            snap.threads.clear();
+            edit(&mut snap);
+            store.record(&snap, "me", "default", &[]).unwrap();
+            let mut req = request("h1");
+            req.key = snap.key;
+            store.queue_review(&req).unwrap().unwrap()
+        };
+        let kept = queue(1, &|_| {});
+        let closed = queue(2, &|_| {});
+        let out_of_window = queue(3, &|_| {});
+        let withdrawn = queue(4, &|_| {});
+        let mine = queue(5, &|s| s.author = "Me".into());
+        let approved = queue(6, &|s| {
+            s.reviews = vec![head_review("r6", "bob", ReviewState::Approved, "")];
+        });
+        let commented = queue(7, &|s| {
+            s.reviews = vec![head_review(
+                "r7",
+                "bob",
+                ReviewState::Commented,
+                "nit: naming",
+            )];
+        });
+        let not_reviews = queue(8, &|s| {
+            let mut bot = head_review("r8a", "renovate", ReviewState::Approved, "");
+            bot.by_bot = true;
+            let mut older = head_review("r8b", "bob", ReviewState::Approved, "");
+            older.commit = Some("h0".into());
+            s.reviews = vec![
+                bot,
+                older,
+                head_review("r8c", "alice", ReviewState::Commented, "done"),
+                head_review("r8d", "carol", ReviewState::Commented, " \n"),
+            ];
+        });
+        let running = queue(9, &|_| {});
+        store.claim_run(running.id).unwrap();
+
+        store
+            .remember_closed(&closed.request.key, "2026-09-01T00:00:00Z")
+            .unwrap();
+        store.mark_closed(&closed.request.key).unwrap();
+        // Out of the reconcile's window: not open, but not found closed.
+        store.mark_closed(&out_of_window.request.key).unwrap();
+        let mut snap = snapshot();
+        snap.key = withdrawn.request.key.clone();
+        snap.threads.clear();
+        snap.review_requested = false;
+        store.record(&snap, "me", "default", &[]).unwrap();
+        let mut gone = snap.clone();
+        gone.key = running.request.key.clone();
+        store.record(&gone, "me", "default", &[]).unwrap();
+
+        assert_eq!(store.stale_review_count("me").unwrap(), 5);
+        assert_eq!(
+            store
+                .supersede_stale_reviews("me", Some(&closed.request.key))
+                .unwrap(),
+            [(closed.request.key.clone(), Stale::Closed)]
+        );
+        assert_eq!(
+            store.supersede_stale_reviews("me", None).unwrap(),
+            [
+                (withdrawn.request.key.clone(), Stale::NotReviewer),
+                (mine.request.key.clone(), Stale::Mine),
+                (approved.request.key.clone(), Stale::Reviewed),
+                (commented.request.key.clone(), Stale::Reviewed),
+            ]
+        );
+        for run in [&closed, &withdrawn, &mine, &approved, &commented] {
+            assert_eq!(status(&store, run.id), "superseded");
+        }
+        // Started runs finish as they are.
+        assert_eq!(status(&store, running.id), "running");
+        assert_eq!(
+            queued_ids(&store),
+            [kept.id, out_of_window.id, not_reviews.id]
+        );
+        assert_eq!(store.stale_review_count("me").unwrap(), 0);
+        assert_eq!(
+            store.stale_reason(&approved.request.key, "me").unwrap(),
+            Some(Stale::Reviewed)
+        );
+        assert_eq!(store.stale_reason(&kept.request.key, "me").unwrap(), None);
+    }
+
+    #[test]
+    fn reviews_started_by_hand_are_never_dropped_as_stale() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut queue_mine = |number: u32| {
+            let mut snap = snapshot();
+            snap.key.number = number;
+            snap.author = "me".into();
+            store.record(&snap, "me", "default", &[]).unwrap();
+            let mut req = request("h1");
+            req.key = snap.key;
+            req
+        };
+        let (fresh, held) = (queue_mine(1), queue_mine(2));
+        let fresh = store.queue_review_by_hand(&fresh).unwrap().unwrap();
+        let held = store.queue_review(&held).unwrap().unwrap();
+        assert!(store.mark_by_hand(held.id).unwrap());
+
+        assert_eq!(store.stale_review_count("me").unwrap(), 0);
+        assert!(
+            store
+                .supersede_stale_reviews("me", None)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(queued_ids(&store), [fresh.id, held.id]);
+        // Only a queued run can be marked.
+        store.claim_run(fresh.id).unwrap();
+        assert!(!store.mark_by_hand(fresh.id).unwrap());
     }
 
     #[test]

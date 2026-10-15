@@ -396,6 +396,10 @@
         form.requestSubmit();
         break;
       }
+      case "S":
+        if (page !== "queue") return;
+        openDialog("/queue/clear-stale");
+        break;
       case "X": {
         const panes = document.getElementById("panes");
         if (!panes) return;

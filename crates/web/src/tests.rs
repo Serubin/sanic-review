@@ -5133,6 +5133,62 @@ async fn cancelling_asks_first_and_says_what_it_costs() {
 }
 
 #[tokio::test]
+async fn clearing_stale_reviews_asks_with_the_count_and_drops_only_those() {
+    let f = fixture(false).await;
+    let (running, closed) = f.with_queue();
+    let kept = {
+        let mut store = f.store();
+        for number in [9, 10, 11] {
+            let snap = PrSnapshot {
+                review_requested: true,
+                head_sha: format!("head{number}"),
+                ..snapshot(number, "alice", "Add the thing")
+            };
+            store.record(&snap, "me", "default", &[]).unwrap();
+        }
+        let req = store.review_request(&key(11)).unwrap().unwrap();
+        store.queue_review(&req).unwrap().unwrap().id
+    };
+    f.store()
+        .remember_closed(&key(10), "2026-09-01T00:00:00Z")
+        .unwrap();
+
+    let asked = f.get("/queue/clear-stale").await;
+    assert_eq!(asked.status, StatusCode::OK);
+    assert!(
+        asked.body.contains("Drop 1 queued review?"),
+        "{}",
+        asked.body
+    );
+    // Asking drops nothing, and a count that grew since asks again.
+    assert_eq!(f.queued_ids(), [closed, kept]);
+    let again = f.post("/queue/clear-stale", &[("stale", "0")]).await;
+    assert!(
+        again.body.contains("Drop 1 queued review?"),
+        "{}",
+        again.body
+    );
+    assert_eq!(f.queued_ids(), [closed, kept]);
+
+    let done = f.post("/queue/clear-stale", &[("stale", "1")]).await;
+    assert_eq!(done.status, StatusCode::OK, "{}", done.body);
+    assert!(
+        done.body.contains("queued reviews of 1 PR"),
+        "{}",
+        done.body
+    );
+    assert_eq!(f.queued_ids(), [kept]);
+    assert_eq!(f.store().run(running).unwrap().unwrap().status, "running");
+
+    let nothing = f.get("/queue/clear-stale").await;
+    assert!(
+        nothing.body.contains("Nothing in the queue is stale"),
+        "{}",
+        nothing.body
+    );
+}
+
+#[tokio::test]
 async fn cancelling_goes_through_serve_and_comes_back_to_the_queue() {
     let f = fixture(false).await;
     let (_, queued) = f.with_queue();

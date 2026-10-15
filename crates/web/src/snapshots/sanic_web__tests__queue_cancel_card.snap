@@ -119,6 +119,12 @@ expression: "readable(&f, &waiting.body)"
 </tr>
 <tr>
 <th>
+<kbd>S</kbd>
+</th>
+<td>in the queue: drop reviews of closed, reviewed or no-longer-yours PRs (asks first)</td>
+</tr>
+<tr>
+<th>
 <kbd>i</kbd>
 </th>
 <td>skip PRs with titles like the selected one</td>

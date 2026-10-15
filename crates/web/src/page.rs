@@ -56,6 +56,10 @@ const KEYS: &[(&str, &str)] = &[
     ("Q", "the run queue: what's running and what's next"),
     ("K/J", "in the queue: move the selected queued run up, down"),
     ("c", "in the queue: cancel the selected run (asks first)"),
+    (
+        "S",
+        "in the queue: drop reviews of closed, reviewed or no-longer-yours PRs (asks first)",
+    ),
     ("i", "skip PRs with titles like the selected one"),
     ("v", "who reviewed the selected PR, and when; Esc closes"),
     ("d", "the selected PR's review run and drafts; Esc closes"),

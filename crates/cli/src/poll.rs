@@ -244,6 +244,10 @@ impl<G: GithubApi> Poller<G> {
         &self.store
     }
 
+    pub fn store_mut(&mut self) -> &mut Store {
+        &mut self.store
+    }
+
     /// The GitHub login everything is judged relative to.
     pub fn me(&self) -> &str {
         &self.me

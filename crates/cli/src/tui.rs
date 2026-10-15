@@ -867,6 +867,8 @@ pub enum Request {
     },
     /// Cancel a queued or running run; a running one's agent is killed.
     Cancel(i64),
+    /// Drop the queued reviews of PRs that no longer need one.
+    ClearStale,
     /// The panes' layout changed; keep it for the next start.
     SaveLayout(Sizes),
 }
@@ -1215,6 +1217,7 @@ impl App {
             }
             queue::Outcome::Move { run, up } => Flow::Request(Request::MoveRun { run, up }),
             queue::Outcome::Cancel(run) => Flow::Request(Request::Cancel(run)),
+            queue::Outcome::ClearStale => Flow::Request(Request::ClearStale),
             queue::Outcome::Dashboard => Flow::Open(Page::Queue),
         }
     }
@@ -1763,7 +1766,7 @@ const HELP: &[(&str, &str)] = &[
     ("e", "edit the config"),
     ("c", "chat with the agent that reviewed it"),
     ("o", "open it in the dashboard, or the index"),
-    ("Q", "the run queue: K/J reorder, c cancels"),
+    ("Q", "the queue: K/J reorder, c cancel, S stale"),
     ("?, Esc", "close this help"),
 ];
 
@@ -3769,6 +3772,18 @@ mod tests {
         assert_eq!(
             app.handle_key(key(KeyCode::Char('y'))),
             Flow::Request(Request::Cancel(1))
+        );
+    }
+
+    #[test]
+    fn s_asks_before_clearing_stale_and_y_sends_it() {
+        let mut app = app_with_queue();
+        press(&mut app, KeyCode::Char('Q'));
+        press(&mut app, KeyCode::Char('S'));
+        insta::assert_snapshot!(draw(&mut app, 100, 24).backend());
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('y'))),
+            Flow::Request(Request::ClearStale)
         );
     }
 

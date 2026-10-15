@@ -9,7 +9,7 @@ use axum::{
 };
 use maud::{Markup, html};
 use sanic_core::run::RunKind;
-use sanic_store::{Cancelled, Direction, Moved, QueueEntry};
+use sanic_store::{Cancelled, Direction, Moved, QueueEntry, Stale};
 use serde::Deserialize;
 use tracing::info;
 
@@ -58,6 +58,13 @@ fn list(app: &App) -> Result<Markup, Error> {
         div #queue hx-get="/queue" hx-trigger="every 5s" hx-select="#queue"
             hx-select-oob="#counts" hx-swap="outerHTML" {
             h1 { "Queue" }
+            @if queued > 0 {
+                p.qtools {
+                    a.linkbtn data-dialog href="/queue/clear-stale" {
+                        "clear stale " (keycap("S"))
+                    }
+                }
+            }
             @if any_held {
                 p.held { "Manual reviews are holding some of these until you start them." }
             }
@@ -73,7 +80,8 @@ fn list(app: &App) -> Result<Markup, Error> {
             p.help-foot {
                 (keycap("j")) (keycap("k")) " move · "
                 (keycap("K")) (keycap("J")) " move a queued run up, down · "
-                (keycap("c")) " cancel · " (keycap("Enter")) " open the PR · "
+                (keycap("c")) " cancel · " (keycap("S")) " clear stale · "
+                (keycap("Enter")) " open the PR · "
                 (keycap("?")) " keys"
             }
         }
@@ -264,6 +272,117 @@ pub async fn confirm_cancel(
         "Cancel run",
         &page::card(&card),
     ))
+}
+
+fn stale_reviews(n: u32) -> String {
+    match n {
+        1 => "1 queued review".into(),
+        n => format!("{n} queued reviews"),
+    }
+}
+
+/// Asks before dropping the queued reviews of PRs that no longer need one,
+/// saying how many.
+fn confirm_stale(app: &App, stale: u32) -> Markup {
+    let card = page::Card {
+        kind: "Clear stale",
+        heading: html! { "Drop " (stale_reviews(stale)) "?" },
+        title: "Queued reviews of PRs that no longer need one",
+        meta: html! {
+            "closed or merged · reviewed on their current head · yours · "
+            "review request withdrawn"
+        },
+        extra: html! {
+            p.extra {
+                "They never started, so nothing has been spent. Running reviews "
+                "finish as they are."
+            }
+        },
+        cost: Some(html! {
+            "Nothing is posted to GitHub. A new push or request reviews them again."
+        }),
+        go: html! {
+            form #confirm method="post" action="/queue/clear-stale" {
+                (csrf_field(app))
+                input type="hidden" name="stale" value=(stale);
+                button.btn.go type="submit" { "Drop them " (keycap("y")) }
+            }
+        },
+        back: ("/queue", "Keep them"),
+        tone: page::Tone::Ask,
+    };
+    page::layout(app, Kind::Confirm, "Clear stale", &page::card(&card))
+}
+
+/// What dropping stale reviews did, or that there was nothing to drop.
+fn stale_done(app: &App, dropped: &[(sanic_core::pr::PrKey, Stale)]) -> Markup {
+    let card = page::Card {
+        kind: "Clear stale",
+        heading: if dropped.is_empty() {
+            html! { "Nothing in the queue is stale" }
+        } else {
+            html! {
+                "Dropped the queued reviews of " (dropped.len())
+                @if dropped.len() == 1 { " PR" } @else { " PRs" }
+            }
+        },
+        title: "Queued reviews of PRs that no longer need one",
+        meta: html! {},
+        extra: html! {
+            @if !dropped.is_empty() {
+                ul.extra {
+                    @for (key, why) in dropped {
+                        li { a href=(pr_href(key)) { (pr_ref(key)) } " · " (why) }
+                    }
+                }
+            }
+        },
+        cost: None,
+        go: html! { a.btn.go href="/queue" { "The queue" } },
+        back: ("/", "The index"),
+        tone: page::Tone::Done,
+    };
+    page::layout(app, Kind::Other, "Clear stale", &page::card(&card))
+}
+
+pub async fn confirm_clear_stale(State(app): State<Shared>) -> Result<Markup, Error> {
+    let stale = app
+        .store()
+        .stale_review_count(&app.me)
+        .map_err(Error::internal)?;
+    if stale == 0 {
+        return Ok(stale_done(&app, &[]));
+    }
+    Ok(confirm_stale(&app, stale))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StaleForm {
+    /// How many stale reviews you were told this drops.
+    stale: u32,
+}
+
+/// Supersedes the stale queued reviews straight in the store, as archiving
+/// does: none has started, so `serve` has nothing to stop.
+pub async fn clear_stale(
+    State(app): State<Shared>,
+    Form(form): Form<StaleForm>,
+) -> Result<Markup, Error> {
+    let mut store = app.store();
+    // More than you were told, say after a refresh, and it asks again.
+    let stale = store.stale_review_count(&app.me).map_err(Error::internal)?;
+    if stale > form.stale {
+        drop(store);
+        return Ok(confirm_stale(&app, stale));
+    }
+    let dropped = store
+        .supersede_stale_reviews(&app.me, None)
+        .map_err(Error::internal)?;
+    drop(store);
+    for (key, why) in &dropped {
+        info!(url = %key.url(), "queued review superseded from the dashboard: {why}");
+    }
+    Ok(stale_done(&app, &dropped))
 }
 
 /// Cancels the run through `serve`, which stops its agent if it's running.
