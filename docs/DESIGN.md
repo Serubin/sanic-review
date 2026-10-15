@@ -1039,8 +1039,10 @@ fonttools (run through `uv`, which only this task needs) to
   - The tab remembers the index's last query, archived view included
     (`sessionStorage`), so the top bar's home link, `q`, and the other
     links to the index go back to it filtered as you left it. A bare `/`
-    you type or load is unfiltered, and the index unfiltered forgets
-    what was kept. A new tab, such as a PR opened in one from the index,
+    reached from another page, typed, or redirected to, shows it again.
+    Back, Forward, reload and moves within the index (hiding archived
+    PRs, clearing) take the URL as it is, and the index unfiltered
+    forgets what was kept, so a cleared filter stays cleared. A new tab, such as a PR opened in one from the index,
     starts with no session storage, so it takes the query last set in
     any tab (`localStorage`). Without the script, or with storage off,
     those links go to a bare `/`.
