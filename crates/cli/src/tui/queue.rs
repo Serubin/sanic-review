@@ -32,8 +32,17 @@ pub enum Outcome {
         up: bool,
     },
     Cancel(i64),
+    /// Drop the queued reviews of PRs that no longer need one.
+    ClearStale,
     /// Open the dashboard's queue page.
     Dashboard,
+}
+
+/// What a `y` confirms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Confirm {
+    Cancel(i64),
+    ClearStale,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,8 +50,8 @@ pub struct QueueView {
     entries: Vec<QueueEntry>,
     /// The run under the cursor, by id, so a reload that reorders keeps it.
     cursor: Option<i64>,
-    /// A cancel waiting for its `y`.
-    confirm: Option<i64>,
+    /// A cancel or clear waiting for its `y`.
+    confirm: Option<Confirm>,
     /// A move sent but not yet seen: the order it should come back as, and
     /// when it was sent.
     expect: Option<(Vec<i64>, Instant)>,
@@ -95,7 +104,9 @@ impl QueueView {
         if self.at().is_none() {
             self.cursor = self.entries.first().map(|e| e.run_id);
         }
-        if self.confirm.is_some_and(|run| !ids_has(&self.entries, run)) {
+        if let Some(Confirm::Cancel(run)) = self.confirm
+            && !ids_has(&self.entries, run)
+        {
             self.confirm = None;
         }
     }
@@ -121,9 +132,10 @@ impl QueueView {
             return Outcome::Open;
         }
         self.notice = None;
-        if let Some(run) = self.confirm.take() {
-            return match key.code {
-                KeyCode::Char('y') => Outcome::Cancel(run),
+        if let Some(confirm) = self.confirm.take() {
+            return match (key.code, confirm) {
+                (KeyCode::Char('y'), Confirm::Cancel(run)) => Outcome::Cancel(run),
+                (KeyCode::Char('y'), Confirm::ClearStale) => Outcome::ClearStale,
                 _ => Outcome::Open,
             };
         }
@@ -140,8 +152,16 @@ impl QueueView {
             KeyCode::Char('J') => self.shift(false),
             KeyCode::Char('c') => {
                 match self.current() {
-                    Some(entry) => self.confirm = Some(entry.run_id),
+                    Some(entry) => self.confirm = Some(Confirm::Cancel(entry.run_id)),
                     None => self.notice = Some("nothing to cancel".into()),
+                }
+                Outcome::Open
+            }
+            KeyCode::Char('S') => {
+                if self.entries.iter().any(QueueEntry::is_movable) {
+                    self.confirm = Some(Confirm::ClearStale);
+                } else {
+                    self.notice = Some("nothing is queued".into());
                 }
                 Outcome::Open
             }
@@ -237,18 +257,34 @@ impl QueueView {
         }
         lines.push(Line::raw(""));
         match (&self.confirm, &self.notice) {
-            (Some(_), _) => lines.push(Line::styled(
+            (Some(Confirm::Cancel(_)), _) => lines.push(Line::styled(
                 " y cancels this run · any other key keeps it",
                 Style::default().fg(Color::Yellow),
             )),
+            (Some(Confirm::ClearStale), _) => lines.extend([
+                Line::styled(
+                    " y drops the queued reviews of PRs closed, reviewed or",
+                    Style::default().fg(Color::Yellow),
+                ),
+                Line::styled(
+                    " no longer yours to review · any other key keeps them",
+                    Style::default().fg(Color::Yellow),
+                ),
+            ]),
             (None, Some(notice)) => lines.push(Line::styled(
                 format!(" {notice}"),
                 Style::default().fg(Color::Yellow),
             )),
-            (None, None) => lines.push(Line::styled(
-                " j/k move · K/J reorder · c cancel · o dashboard · Esc closes",
-                Style::default().fg(Color::DarkGray),
-            )),
+            (None, None) => lines.extend([
+                Line::styled(
+                    " j/k move · K/J reorder · c cancel · S clear stale",
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Line::styled(
+                    " o dashboard · Esc closes",
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]),
         }
         render_popup(frame, " Queue ", lines);
     }

@@ -302,6 +302,10 @@ impl Dashboard {
                 get(regenerate::confirm).post(regenerate::regenerate),
             )
             .route("/queue", get(queue::page))
+            .route(
+                "/queue/clear-stale",
+                get(queue::confirm_clear_stale).post(queue::clear_stale),
+            )
             .route("/queue/{run}/move", post(queue::move_run))
             .route(
                 "/queue/{run}/cancel",

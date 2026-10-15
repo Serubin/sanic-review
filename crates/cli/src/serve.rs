@@ -183,6 +183,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         &run_store,
         &config.manual_reviews(),
         &config.skip_rules(),
+        &me,
         &runs,
     )?;
     let worker = Arc::new(Worker::new(&data_dir, Arc::clone(&run_store), &config, &me));
@@ -598,20 +599,22 @@ impl ProgressLog {
 }
 
 /// Puts the runs a previous process left running back in the queue,
-/// superseding those of PRs `skips` leaves unlisted, and sends them to
-/// `runs`, which holds those `manual` holds. The worker
-/// takes them from the store in the queue's order; the send is what tells
-/// it they're there, and what logs each held one.
+/// superseding those of PRs `skips` leaves unlisted or that are stale for
+/// `me`, and sends them to `runs`, which holds those `manual` holds. The
+/// worker takes them from the store in the queue's order; the send is what
+/// tells it they're there, and what logs each held one.
 fn resume_queued(
     store: &Mutex<Store>,
     manual: &ManualReviews,
     skips: &SkipRules,
+    me: &str,
     runs: &mpsc::UnboundedSender<QueuedRun>,
 ) -> Result<()> {
     let recovered = {
         let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
         store.recover_runs()?;
         work::supersede_unlisted(&mut store, skips, None);
+        work::supersede_stale(&mut store, me, None);
         store.queued_reviews()?
     };
     let held = {
@@ -673,6 +676,10 @@ async fn handle_requests(
                     if let Err(err) = cancel_run(&store, &worker, run) {
                         warn!(run, "cancelling failed: {err:?}");
                     }
+                }
+                Some(Request::ClearStale) => {
+                    let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
+                    work::supersede_stale(&mut store, worker.me(), None);
                 }
                 Some(Request::SaveLayout(sizes)) => save_layout(sizes, &store),
                 None => open = false,
@@ -747,12 +754,17 @@ fn review_now(key: &PrKey, store: &Mutex<Store>, starter: &Starter) {
         let held = store
             .queued_review(key)
             .map(|run| run.filter(|run| held_why(&manual, &store, run).is_some()));
+        // Marked, so a stale sweep doesn't drop it while it waits for a slot.
+        let held = held.and_then(|held| match held {
+            Some(run) => Ok(store.mark_by_hand(run.id)?.then_some(run)),
+            None => Ok(None),
+        });
         held.and_then(|held| match held {
             Some(run) => Ok(Some(run)),
             None => store.review_request(key).and_then(|req| match req {
                 Some(req) => {
                     let req = by_hand(&store, req)?;
-                    store.queue_review(&req)
+                    store.queue_review_by_hand(&req)
                 }
                 None => Ok(None),
             }),
@@ -1132,8 +1144,9 @@ async fn refresh_queued<G: GithubApi>(
                     // ends `serve` anyway.
                     let _ = updates.send(update);
                 }
+                supersede_stale(poller, &key);
             }
-            Ok(None) => {}
+            Ok(None) => supersede_stale(poller, &key),
             Err(err @ (ApiError::RateLimited { .. } | ApiError::Unauthorized)) => {
                 pending.push(key, priority);
                 backoff = handle(err)?;
@@ -1145,6 +1158,13 @@ async fn refresh_queued<G: GithubApi>(
     }
     live.progress.send_replace(None);
     Ok((triggered, backoff))
+}
+
+/// Supersedes `key`'s queued review if the refresh just recorded made it
+/// stale: closed, approved, or no longer yours to review.
+fn supersede_stale<G: GithubApi>(poller: &mut Poller<G>, key: &PrKey) {
+    let me = poller.me().to_owned();
+    work::supersede_stale(poller.store_mut(), &me, Some(key));
 }
 
 /// Checks the head of each queued review sent, on its base, for
@@ -1534,6 +1554,7 @@ mod tests {
             &store,
             &ManualReviews::default(),
             &config.skip_rules(),
+            "me",
             &runs,
         )
         .unwrap();
@@ -1951,6 +1972,73 @@ mod tests {
         let fetched = poller.github().fetched.borrow();
         assert_eq!(fetched.first(), Some(&asked_for), "{fetched:?}");
         assert_eq!(fetched.len(), 3);
+    }
+
+    /// A refresh that finds a PR merged or its head approved drops its
+    /// queued review.
+    #[tokio::test]
+    async fn refreshes_supersede_reviews_gone_stale() {
+        use sanic_core::pr::{Review, ReviewState};
+
+        use crate::poll::tests::{FakeGithub, key, poller, snapshot};
+
+        let prs = [key("org/a", 1), key("org/b", 2), key("org/c", 3)];
+        let github = FakeGithub::default();
+        for pr in &prs {
+            let mut snap = snapshot(pr, "alice", &[]);
+            snap.review_requested = true;
+            github.prs.borrow_mut().insert(pr.clone(), snap);
+        }
+        let mut poller = poller(github);
+        let (updates, _updates) = mpsc::unbounded_channel();
+        let live = Live::new(poller.config(), None);
+        let refresh = async |poller: &mut Poller<_>| {
+            let mut pending = RefreshQueue::default();
+            pending.extend(prs.clone(), Priority::Involved);
+            let mut asked = mpsc::unbounded_channel().1;
+            refresh_queued(
+                poller,
+                &mut pending,
+                &mut asked,
+                &mut HashSet::new(),
+                &updates,
+                &live,
+            )
+            .await
+            .unwrap();
+        };
+        refresh(&mut poller).await;
+        let runs: Vec<QueuedRun> = prs
+            .iter()
+            .map(|pr| {
+                let store = poller.store_mut();
+                let req = store.review_request(pr).unwrap().unwrap();
+                store.queue_review(&req).unwrap().unwrap()
+            })
+            .collect();
+
+        poller.github().prs.borrow_mut().remove(&prs[0]);
+        poller
+            .github()
+            .prs
+            .borrow_mut()
+            .get_mut(&prs[1])
+            .unwrap()
+            .reviews
+            .push(Review {
+                id: "r1".into(),
+                author: "bob".into(),
+                state: ReviewState::Approved,
+                body: String::new(),
+                submitted_at: "2026-01-02T00:00:00Z".into(),
+                commit: Some("h1".into()),
+                by_bot: false,
+            });
+        refresh(&mut poller).await;
+        let status = |run: &QueuedRun| poller.store().run(run.id).unwrap().unwrap().status;
+        assert_eq!(status(&runs[0]), "superseded");
+        assert_eq!(status(&runs[1]), "superseded");
+        assert_eq!(status(&runs[2]), "queued");
     }
 
     #[test]

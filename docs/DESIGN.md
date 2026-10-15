@@ -474,6 +474,10 @@ Rules:
     or from the PR's profile. Globs match the whole title, ignoring case,
     and only glob syntax is special, so `(` and `)` match themselves.
 
+  When a review comes due it's also skipped if the PR is stale: a refresh
+  found it closed or merged, you wrote it, or your request was withdrawn
+  and you never reviewed it.
+
   The check runs when a review comes due, against the PR and config at
   that moment, so edits, archiving and config reloads in the meantime
   count. A skipped review is logged on the PR, e.g. "review skipped: title
@@ -490,10 +494,29 @@ Rules:
   started from its page once it's unlisted is left to run, and a running
   one finishes. `serve`'s startup supersedes every review of an unlisted
   PR that a previous process left queued or running, a hand-started one
-  included: runs don't record who started them. Letting the author back
+  included. Letting the author back
   in lists the PR again at once, and the next trigger reviews it.
   There's no pattern for every bot: GitHub gives app logins without
   `[bot]`, so a glob can't tell them from people's.
+- **Stale reviews.** A queued review is dropped (marked `superseded`) once
+  its PR no longer needs one, as last polled:
+  - a refresh found it closed or merged. Falling out of the recency window
+    doesn't count: that's a view of the PR, not a fact about it;
+  - you wrote it;
+  - your request was withdrawn and you never reviewed it;
+  - someone other than its author left an approving or
+    changes-requested review on its current head, or a commenting one
+    with a body. Bots' reviews don't count, nor do the empty commenting
+    reviews thread replies are stored as.
+
+  It's checked after each refresh of a PR, for that PR, and for every PR
+  at `serve`'s start, so a review held under manual reviews doesn't sit in
+  the queue for days after the PR merged. Running reviews finish as they
+  are, and a review you started by hand (Review now, `r`, or
+  `sanic-review review`) is never dropped as stale while it waits for a
+  slot: the run records that you started it. Dropping is logged on the PR
+  with why, and a new push or request reviews it again. `S` on the queue,
+  in the TUI or the dashboard, does the same for every PR on demand.
 - **Archive.** Archiving a PR is yours alone to set and clear: new pushes
   and comments don't clear it. An archived PR is silent: it gets no
   automatic runs of any kind, and archiving supersedes every run of it
@@ -885,7 +908,7 @@ invited to draft replies or fixes on someone else's PR.
 | `threads` | GitHub thread id, path, lines and side on the head it was fetched at, resolved, outdated, and its lines in the commit it was left on |
 | `comments` | GitHub comment id, thread, author, body, link, created_at |
 | `events` | raw normalized events from both poll loops |
-| `runs` | pr, kind, trigger, key, status (`queued/running/succeeded/failed/crashed/superseded/cancelled`), its place in the queue while it's queued, suggested verdict, session id, transcript path, timings; for a regeneration, its source run, your instruction and, when it revises one draft, that draft; how many of your pending review's comments its agent was shown; for a run that continued a session, the run it resumed or revises, and for a push review, the run whose worktree path it used; for one that found nothing new, the agent's summary as its no-update note |
+| `runs` | pr, kind, trigger, key, status (`queued/running/succeeded/failed/crashed/superseded/cancelled`), its place in the queue while it's queued, whether you started it by hand, suggested verdict, session id, transcript path, timings; for a regeneration, its source run, your instruction and, when it revises one draft, that draft; how many of your pending review's comments its agent was shown; for a run that continued a session, the run it resumed or revises, and for a push review, the run whose worktree path it used; for one that found nothing new, the agent's summary as its no-update note |
 | `drafts` | run, kind (comment/reply/summary), anchor, original body, edited body, status (`pending/accepted/rejected/stale/posted/dismissed`), unanchored flag, the agent's private note, why the agent dropped it when asked to revise it, why a push review dismissed it as obsolete, for a comment posted in an existing thread, the thread and whether it's a reply or a 👍 (and on which comment), and for one posted inline, the comment GitHub made of it |
 | `pending_reviews` | per PR, a review a submit created pending on GitHub, or sent in one call without an answer yet, and hasn't seen posted or gone: its run, its drafts with their bodies as posted, and the pending review's id or what the call sent |
 | `in_progress_reviews` | per PR, your own review pending on GitHub as last polled: its node id and comments |
@@ -903,7 +926,8 @@ their PRs. The next start runs them, or holds them under manual
 reviews. A second Ctrl-C exits without waiting for that. Runs
 left `running` by a previous process are requeued at
 startup, unless the same PR also has a run queued after it: that one is for
-a newer head, so the older run is marked `superseded` instead. A requeued
+a newer head, so the older run is marked `superseded` instead. Queued
+reviews of stale PRs are then dropped (see Stale reviews). A requeued
 run keeps the place it had, so the order survives a restart.
 
 Keeping both the original and the edited body means the edit history is
@@ -1106,6 +1130,13 @@ fonttools (run through `uv`, which only this task needs) to
   page was drawn; moving a run that has started meanwhile is refused rather
   than moving the wrong one, and a press at either end just redraws. A
   running run can't be moved: its place is behind it.
+
+  Clear stale (`S`) drops the queued reviews of every stale PR (see Stale
+  reviews) at once. It asks first, on a card that says how many, and asks
+  again if more have gone stale by the time you confirm; the card it
+  leaves lists each PR and why. It writes the store directly, as
+  archiving does: none of those runs has started, so `serve` has nothing
+  to stop.
 
   Cancel asks first, on its own card, worded by state: a queued run has
   spent nothing, while a running one's agent is killed, its worktree
@@ -1558,9 +1589,10 @@ fonttools (run through `uv`, which only this task needs) to
   - **Queue.** `Q` opens the queue as an overlay, not a fifth pane, so it
     opens whatever the panes are doing: the same list the dashboard shows,
     running runs first. `j`/`k` move, `K`/`J` move the selected queued run
-    up and down, `c` asks and `y` cancels, `o` opens the dashboard's queue
-    page, and `Esc` or `q` closes. The TUI's own connection is read-only,
-    so both the move and the cancel go through `serve`, as `x` and `r` do.
+    up and down, `c` asks and `y` cancels, `S` asks and `y` drops stale
+    reviews (see Stale reviews), `o` opens the dashboard's queue page, and
+    `Esc` or `q` closes. The TUI's own connection is read-only, so the move,
+    the cancel and the clear go through `serve`, as `x` and `r` do.
     A move shows at once and gives way to the store's order as soon as the
     store agrees, so the one-second reload doesn't undo it mid-flight; a
     refused one corrects itself within a moment, and a run that started or

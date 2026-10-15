@@ -23,7 +23,7 @@ use sanic_core::{
     manual::ManualReviews,
     pr::PrKey,
     run::{QueuedRun, ReviewRequest, ReviewTrigger},
-    skip::{PrFacts, Skip, SkipRules},
+    skip::{PrFacts, SkipRules},
     trigger::Trigger,
 };
 use sanic_store::Store;
@@ -367,9 +367,10 @@ fn drop_settled_review(update: &mut Update, store: &mut Store) -> bool {
     }
 }
 
-/// Why `key` isn't reviewed automatically, if it isn't.
-fn skip(store: &Store, rules: &SkipRules, key: &PrKey, me: &str) -> Result<Option<Skip>> {
-    Ok(store.pr_summary(key)?.and_then(|pr| {
+/// Why `key` isn't reviewed automatically, if it isn't: a skip rule, or
+/// it's [`Stale`](sanic_store::Stale) as last polled.
+fn skip(store: &Store, rules: &SkipRules, key: &PrKey, me: &str) -> Result<Option<String>> {
+    let skip = store.pr_summary(key)?.and_then(|pr| {
         rules.decide(&PrFacts {
             profile: &pr.profile,
             title: &pr.title,
@@ -380,7 +381,11 @@ fn skip(store: &Store, rules: &SkipRules, key: &PrKey, me: &str) -> Result<Optio
             head_reviewers: &pr.head_reviewers,
             me,
         })
-    }))
+    });
+    if let Some(skip) = skip {
+        return Ok(Some(skip.to_string()));
+    }
+    Ok(store.stale_reason(key, me)?.map(|stale| stale.to_string()))
 }
 
 #[cfg(test)]
@@ -822,6 +827,40 @@ mod tests {
             "me".into(),
         ));
         tx.send(update(1, "h1", vec![requested("h1")])).unwrap();
+        tokio::time::sleep(QUIET * 2).await;
+        drop(tx);
+        task.await.unwrap().unwrap();
+        assert!(runs.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn closed_or_withdrawn_prs_are_not_queued() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (runs_tx, mut runs) = mpsc::unbounded_channel();
+        let (due_tx, _due) = watch::channel(DueTimes::new());
+        let (_skips_tx, skips) = watch::channel(SkipRules::default());
+        let store = store();
+        {
+            let mut store = store.lock().unwrap();
+            let mut withdrawn = snapshot("alice", true);
+            withdrawn.key = key(2);
+            withdrawn.review_requested = false;
+            store.record(&withdrawn, "me", "default", &[]).unwrap();
+            store
+                .remember_closed(&key(1), "2026-09-01T00:00:00Z")
+                .unwrap();
+        }
+        let task = tokio::spawn(schedule(
+            rx,
+            store,
+            runs_tx,
+            due_tx,
+            skips,
+            watch::channel(ManualReviews::default()).1,
+            "me".into(),
+        ));
+        tx.send(update(1, "h1", vec![requested("h1")])).unwrap();
+        tx.send(update(2, "h1", vec![requested("h1")])).unwrap();
         tokio::time::sleep(QUIET * 2).await;
         drop(tx);
         task.await.unwrap().unwrap();
