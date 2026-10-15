@@ -61,10 +61,14 @@ impl Facet {
         }
     }
 
-    /// Whether the facet filters `list`: your PRs are all yours, so author
-    /// doesn't.
-    pub fn applies(self, list: Side) -> bool {
-        !(self == Self::Author && list == Side::Mine)
+    /// Whether a pick of `value` filters `list`: your PRs are all yours, so
+    /// author doesn't, and a status filters only the list that has it.
+    pub fn applies(self, value: &str, list: Side) -> bool {
+        match self {
+            Self::Author => list == Side::Owed,
+            Self::Status => list.statuses().contains(&value),
+            Self::Reviewer | Self::Repo | Self::State => true,
+        }
     }
 }
 
@@ -78,6 +82,13 @@ pub const STATUSES: &[(&str, &str)] = &[
     ("waiting", "Waiting on reviewers"),
     ("archived", "Archived"),
 ];
+
+/// The [`STATUSES`] the reviews you owe have; an archived one is both
+/// archived and nothing to do.
+pub const OWED_STATUSES: &[&str] = &["needs-you", "in-flight", "nothing-to-do", "archived"];
+
+/// The [`STATUSES`] your PRs have.
+pub const MY_STATUSES: &[&str] = &["needs-you", "ready", "waiting", "archived"];
 
 /// What the State facet can say of a row.
 pub const STATES: &[(&str, &str)] = &[
@@ -100,12 +111,38 @@ pub enum Side {
     Mine,
 }
 
+impl Side {
+    const ALL: [Self; 2] = [Self::Owed, Self::Mine];
+
+    /// The list's id, which is also its tab's.
+    fn key(self) -> &'static str {
+        match self {
+            Self::Owed => "owed",
+            Self::Mine => "mine",
+        }
+    }
+
+    fn words(self) -> &'static str {
+        match self {
+            Self::Owed => "reviews you owe",
+            Self::Mine => "your PRs",
+        }
+    }
+
+    fn statuses(self) -> &'static [&'static str] {
+        match self {
+            Self::Owed => OWED_STATUSES,
+            Self::Mine => MY_STATUSES,
+        }
+    }
+}
+
 /// What the filter sees of a row.
 #[derive(Debug, Clone)]
 pub struct RowValues<'a> {
     pub list: Side,
-    /// A [`STATUSES`] value.
-    pub status: &'static str,
+    /// Its [`STATUSES`] values: its group's, and `archived` if it is.
+    pub statuses: Vec<&'static str>,
     /// Someone else's PR's author; `None` for yours.
     pub author: Option<&'a str>,
     /// Whoever the status cell counts as having reviewed it.
@@ -123,7 +160,7 @@ pub struct RowValues<'a> {
 impl RowValues<'_> {
     fn values(&self, facet: Facet) -> Vec<&str> {
         match facet {
-            Facet::Status => vec![self.status],
+            Facet::Status => self.statuses.clone(),
             Facet::Author => self.author.into_iter().collect(),
             Facet::Reviewer => self.reviewers.clone(),
             Facet::Repo => vec![self.repo.as_str()],
@@ -181,11 +218,11 @@ impl Filter {
 
     /// [`Filter::matches`], leaving out what's picked in `skip`.
     fn matches_but(&self, row: &RowValues, skip: Option<Facet>) -> bool {
-        let facets = Facet::ALL
-            .into_iter()
-            .filter(|facet| Some(*facet) != skip && facet.applies(row.list));
-        for facet in facets {
-            let mut want = self.picked(facet).peekable();
+        for facet in Facet::ALL.into_iter().filter(|f| Some(*f) != skip) {
+            let mut want = self
+                .picked(facet)
+                .filter(|v| facet.applies(v, row.list))
+                .peekable();
             if want.peek().is_some() && !want.any(|v| row.has(facet, v)) {
                 return false;
             }
@@ -343,13 +380,66 @@ pub fn hidden_line(query: &IndexQuery, hidden: usize, note: Option<&str>) -> Mar
     }
 }
 
+/// What of the filter `list` ignores, for under its heading: the picks
+/// that don't apply to it.
+pub fn not_applied(filter: &Filter, list: Side, me: &str) -> Option<String> {
+    let picks: Vec<String> = Facet::ALL
+        .into_iter()
+        .flat_map(|facet| {
+            filter
+                .picked(facet)
+                .filter(move |v| !facet.applies(v, list))
+                .map(move |v| words(facet, v, me))
+        })
+        .collect();
+    (!picks.is_empty()).then(|| format!("not applied here: {}", picks.join(", ")))
+}
+
 /// One value of a facet in the sidebar.
 struct Choice {
     value: String,
     words: String,
     /// Rows it would leave, under the other facets and the words.
     rows: usize,
+    sides: [OnSide; 2],
     picked: bool,
+}
+
+/// A value as one list's tab shows it.
+#[derive(Debug, Clone, Copy)]
+struct OnSide {
+    side: Side,
+    /// Listed on the tab: the list has the value.
+    on: bool,
+    /// A pick of it filters the list.
+    applies: bool,
+    /// The list's rows it would leave.
+    rows: usize,
+}
+
+impl Choice {
+    fn side(&self, side: Side) -> Option<&OnSide> {
+        self.sides.iter().find(|s| s.side == side)
+    }
+
+    fn on(&self, side: Side) -> bool {
+        self.side(side).is_some_and(|s| s.on)
+    }
+
+    /// The lists it's a value of, as `data-on` spells them.
+    fn on_keys(&self) -> String {
+        sides_where(|side| self.on(side))
+    }
+}
+
+/// `owed mine`, or as many of them as `f` keeps, for a `data-on`.
+fn sides_where(f: impl Fn(Side) -> bool) -> String {
+    let keys: Vec<&str> = Side::ALL
+        .into_iter()
+        .filter(|s| f(*s))
+        .map(Side::key)
+        .collect();
+    keys.join(" ")
 }
 
 /// The sidebar: a form whose query is the index's, sent as you tick a
@@ -412,6 +502,11 @@ fn in_use(filter: &Filter, me: &str) -> Markup {
 /// The facets, each value with how many rows it would leave. Everything
 /// in them that takes focus has an id, so htmx puts focus back on it when
 /// they're replaced.
+///
+/// Each value says which lists have it (`data-on`) and which a pick of it
+/// filters (`data-applies`), and carries its count for each list and for
+/// both (`data-side`); the stylesheet shows the open tab's, or both's
+/// without the script.
 pub fn facets(query: &IndexQuery, rows: &[RowValues], me: &str) -> Markup {
     let filter = &query.filter;
     html! {
@@ -423,7 +518,7 @@ pub fn facets(query: &IndexQuery, rows: &[RowValues], me: &str) -> Markup {
                 @let choices = choices(filter, facet, rows, me);
                 @if !choices.is_empty() {
                     @let (shown, more) = fold(&choices);
-                    fieldset.facet {
+                    fieldset.facet data-on=(sides_where(|s| choices.iter().any(|c| c.on(s)))) {
                         legend {
                             (facet.label())
                             @if facet == Facet::Author { " " span.dim { "reviews you owe" } }
@@ -431,9 +526,16 @@ pub fn facets(query: &IndexQuery, rows: &[RowValues], me: &str) -> Markup {
                         }
                         @for choice in shown { (option(facet, choice)) }
                         @if !more.is_empty() {
-                            details.fmore id={ "facet-more-" (facet.key()) } {
+                            details.fmore id={ "facet-more-" (facet.key()) }
+                                data-on=(sides_where(|s| more.iter().any(|c| c.on(s)))) {
                                 summary id={ "facet-more-" (facet.key()) "-open" } {
-                                    (more.len()) " more"
+                                    span data-side="all" { (more.len()) }
+                                    @for side in Side::ALL {
+                                        span data-side=(side.key()) {
+                                            (more.iter().filter(|c| c.on(side)).count())
+                                        }
+                                    }
+                                    " more"
                                 }
                                 @for choice in more { (option(facet, choice)) }
                             }
@@ -445,7 +547,8 @@ pub fn facets(query: &IndexQuery, rows: &[RowValues], me: &str) -> Markup {
     }
 }
 
-/// A facet's link that ticks all its values, or unticks them once all are.
+/// A facet's link that ticks all its values, both lists' alike, or unticks
+/// them once all are.
 fn toggle(query: &IndexQuery, facet: Facet, choices: &[Choice]) -> Markup {
     let all = choices.iter().all(|c| c.picked);
     let values: Vec<&str> = if all {
@@ -471,15 +574,28 @@ fn fold(choices: &[Choice]) -> (Vec<&Choice>, Vec<&Choice>) {
 
 fn option(facet: Facet, choice: &Choice) -> Markup {
     let id = format!("f-{}-{}", facet.key(), hex(&choice.value));
+    let applies = |s: Side| choice.side(s).is_some_and(|s| s.applies);
+    let zero = sides_where(|s| choice.side(s).is_some_and(|s| s.applies && s.rows == 0));
+    // Shown on a tab whose list it doesn't filter, which only a pick is.
+    let tag: Vec<&str> = Side::ALL
+        .into_iter()
+        .filter(|s| applies(*s))
+        .map(Side::words)
+        .collect();
     html! {
-        label.fopt.zero[choice.rows == 0] for=(id) {
+        label.fopt.zero[choice.rows == 0].picked[choice.picked] for=(id)
+            data-on=(choice.on_keys()) data-applies=(sides_where(applies)) data-zero=(zero) {
             input id=(id) type="checkbox" name=(facet.key()) value=(choice.value)
                 checked[choice.picked];
             span.fv {
                 @if facet == Facet::State && choice.value == "unseen" { span.newdot {} " " }
                 (choice.words)
+                @if tag.len() == 1 { " " span.ftag { "· " (tag.join("")) } }
             }
-            span.fn { (choice.rows) }
+            span.fn data-side="all" { (choice.rows) }
+            @for s in &choice.sides {
+                span.fn data-side=(s.side.key()) { @if s.applies { (s.rows) } }
+            }
         }
     }
 }
@@ -507,9 +623,8 @@ fn hex(value: &str) -> String {
 }
 
 /// A facet's values: the fixed ones in order, else the commonest first,
-/// among the rows it filters, and whatever is picked.
+/// among the rows, and whatever is picked.
 fn choices(filter: &Filter, facet: Facet, rows: &[RowValues], me: &str) -> Vec<Choice> {
-    let rows: Vec<&RowValues> = rows.iter().filter(|r| facet.applies(r.list)).collect();
     // How often each value comes up, by its lowercase spelling for logins
     // and repos, keeping the first spelling seen.
     let mut seen: Vec<(String, usize)> = Vec::new();
@@ -526,7 +641,7 @@ fn choices(filter: &Filter, facet: Facet, rows: &[RowValues], me: &str) -> Vec<C
             seen.push((value.to_owned(), n));
         }
     };
-    for row in &rows {
+    for row in rows {
         for value in row.values(facet) {
             note(value, 1);
         }
@@ -545,16 +660,27 @@ fn choices(filter: &Filter, facet: Facet, rows: &[RowValues], me: &str) -> Vec<C
     }
     seen.into_iter()
         .map(|(value, _)| {
-            let rows = rows
-                .iter()
-                .filter(|r| r.has(facet, &value) && filter.matches_but(r, Some(facet)))
-                .count();
+            let leaves =
+                |r: &&RowValues| r.has(facet, &value) && filter.matches_but(r, Some(facet));
+            let side = |side: Side| {
+                let of_side = || rows.iter().filter(|r| r.list == side);
+                // People and repos are a list's when one of its rows has them.
+                let applies = facet.applies(&value, side);
+                OnSide {
+                    side,
+                    on: applies
+                        && (facet.fixed().is_some() || of_side().any(|r| r.has(facet, &value))),
+                    applies,
+                    rows: of_side().filter(leaves).count(),
+                }
+            };
             let words = words(facet, &value, me);
             Choice {
                 picked: filter.is_picked(facet, &value),
+                rows: rows.iter().filter(leaves).count(),
+                sides: Side::ALL.map(side),
                 value,
                 words,
-                rows,
             }
         })
         .collect()
@@ -567,7 +693,7 @@ mod tests {
     fn row<'a>(list: Side, author: Option<&'a str>, reviewers: Vec<&'a str>) -> RowValues<'a> {
         RowValues {
             list,
-            status: "needs-you",
+            statuses: vec!["needs-you"],
             author,
             reviewers,
             repo: "org/repo".into(),
@@ -614,6 +740,97 @@ mod tests {
             "author=alice&author=bob&author=carol&author=dave&author=erin&author=frank&q=retry",
         );
         assert!(toggle_of(&all).contains("href=\"/?q=retry\" data-tick=\"false\">none<"));
+    }
+
+    fn with_statuses<'a>(mut row: RowValues<'a>, statuses: &[&'static str]) -> RowValues<'a> {
+        row.statuses = statuses.to_vec();
+        row
+    }
+
+    #[test]
+    fn a_status_filters_only_the_list_that_has_it() {
+        let owed_quiet = with_statuses(row(Side::Owed, Some("a"), vec![]), &["nothing-to-do"]);
+        let owed_need = row(Side::Owed, Some("a"), vec![]);
+        let mine_ready = with_statuses(row(Side::Mine, None, vec![]), &["ready"]);
+        let mine_need = row(Side::Mine, None, vec![]);
+        let ready = query("status=ready").filter;
+        assert!(ready.matches(&owed_quiet) && ready.matches(&owed_need));
+        assert!(ready.matches(&mine_ready) && !ready.matches(&mine_need));
+        let mixed = query("status=needs-you&status=ready").filter;
+        assert!(!mixed.matches(&owed_quiet) && mixed.matches(&owed_need));
+        assert!(mixed.matches(&mine_ready) && mixed.matches(&mine_need));
+        // An archived review you owe is archived as well as quiet.
+        let archived = with_statuses(owed_quiet.clone(), &["nothing-to-do", "archived"]);
+        let f = query("status=archived").filter;
+        assert!(f.matches(&archived) && !f.matches(&owed_quiet));
+        assert_eq!(
+            not_applied(&ready, Side::Owed, "me").as_deref(),
+            Some("not applied here: Ready")
+        );
+        assert_eq!(not_applied(&ready, Side::Mine, "me"), None);
+    }
+
+    #[test]
+    fn a_value_counts_and_shows_per_list() {
+        let rows = [
+            row(Side::Owed, Some("alice"), vec!["carol"]),
+            with_statuses(row(Side::Mine, None, vec!["dave"]), &["ready"]),
+            row(Side::Mine, None, vec!["carol"]),
+        ];
+        let f = query("author=alice&status=ready").filter;
+        let reviewers = choices(&f, Facet::Reviewer, &rows, "me");
+        let got: Vec<_> = reviewers
+            .iter()
+            .map(|c| (c.value.as_str(), c.on_keys(), c.sides.map(|s| s.rows)))
+            .collect();
+        // Ready leaves your PRs by dave, not carol's; alice leaves the review.
+        assert_eq!(
+            got,
+            [
+                ("carol", "owed mine".into(), [1, 0]),
+                ("dave", "mine".into(), [0, 1])
+            ]
+        );
+        let statuses = choices(&f, Facet::Status, &rows, "me");
+        let ready = statuses.iter().find(|c| c.value == "ready").unwrap();
+        assert_eq!(ready.on_keys(), "mine");
+        assert!(
+            option(Facet::Status, ready)
+                .into_string()
+                .contains("· your PRs")
+        );
+        let authors = choices(&f, Facet::Author, &rows, "me");
+        assert_eq!(authors[0].on_keys(), "owed");
+    }
+
+    #[test]
+    fn a_pick_a_list_lacks_but_applies_to_is_zero_there_not_elsewhere() {
+        let rows = [
+            row(Side::Owed, Some("a"), vec!["alice"]),
+            row(Side::Mine, None, vec![]),
+        ];
+        let f = query("reviewer=alice").filter;
+        let alice = &choices(&f, Facet::Reviewer, &rows, "me")[0];
+        // Not listed on your PRs' tab, but picked it empties them: no tag.
+        assert_eq!(alice.on_keys(), "owed");
+        let html = option(Facet::Reviewer, alice).into_string();
+        assert!(
+            html.contains(r#"data-on="owed" data-applies="owed mine" data-zero="mine""#),
+            "{html}"
+        );
+        assert!(!html.contains("ftag"));
+        assert_eq!(not_applied(&f, Side::Mine, "me"), None);
+    }
+
+    #[test]
+    fn a_status_that_isnt_one_filters_neither_list() {
+        let f = query("status=bogus").filter;
+        assert!(f.matches(&row(Side::Owed, Some("a"), vec![])));
+        assert!(f.matches(&row(Side::Mine, None, vec![])));
+        assert_eq!(
+            not_applied(&f, Side::Mine, "me").as_deref(),
+            Some("not applied here: bogus")
+        );
     }
 
     #[test]

@@ -431,6 +431,50 @@ main:has(> #filter) {
   vertical-align: middle;
 }
 
+/* The sidebar follows the open tab: its list's counts, links and values,
+   and both lists' without the script, where there are no tabs. */
+.fside [data-side="owed"],
+.fside [data-side="mine"],
+.js .fside [data-side="all"] {
+  display: none;
+}
+
+.js:not([data-tab="mine"]) .fside [data-side="owed"],
+.js[data-tab="mine"] .fside [data-side="mine"] {
+  display: revert;
+}
+
+/* Picks stay shown until the refresh, so unticking one keeps focus. */
+.js:not([data-tab="mine"]) .fside :is(.facet, .fopt, .fmore):not([data-on~="owed"]):not(.picked, :has(.picked)),
+.js[data-tab="mine"] .fside :is(.facet, .fopt, .fmore):not([data-on~="mine"]):not(.picked, :has(.picked)) {
+  display: none;
+}
+
+/* A pick that doesn't filter the open tab's list: still there to untick. */
+.fopt .ftag {
+  display: none;
+  font-size: 12px;
+}
+
+.js:not([data-tab="mine"]) .fopt:not([data-applies~="owed"]),
+.js[data-tab="mine"] .fopt:not([data-applies~="mine"]) {
+  color: var(--dim);
+}
+
+.js:not([data-tab="mine"]) .fopt:not([data-applies~="owed"]) .ftag,
+.js[data-tab="mine"] .fopt:not([data-applies~="mine"]) .ftag {
+  display: inline;
+}
+
+.js .fopt.zero {
+  color: inherit;
+}
+
+.js:not([data-tab="mine"]) .fopt[data-zero~="owed"],
+.js[data-tab="mine"] .fopt[data-zero~="mine"] {
+  color: var(--dim);
+}
+
 details.fmore > summary {
   font-size: 12px;
   color: var(--accent);
