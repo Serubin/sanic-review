@@ -37,78 +37,110 @@ expression: "readable(&f, &page.body)"
 <input id="fq" type="search" name="q" value="" placeholder="title or #number" autocomplete="off" aria-label="words in the title or owner/name#N" hx-get="/" hx-trigger="input changed delay:250ms, search" hx-include="#filter">
 <button class="btn fapply" type="submit">Filter</button>
 <div id="facets">
-<fieldset class="facet">
+<fieldset class="facet" data-on="owed mine">
 <legend>Status<a class="fall" id="facet-all-status" href="/?status=needs-you&amp;status=nothing-to-do&amp;status=ready" data-tick="true">all</a>
 </legend>
-<label class="fopt" for="f-status-6e656564732d796f75">
+<label class="fopt" for="f-status-6e656564732d796f75" data-on="owed mine" data-applies="owed mine" data-zero="mine">
 <input id="f-status-6e656564732d796f75" type="checkbox" name="status" value="needs-you">
 <span class="fv">Needs you</span>
-<span class="fn">2</span>
+<span class="fn" data-side="all">2</span>
+<span class="fn" data-side="owed">2</span>
+<span class="fn" data-side="mine">0</span>
 </label>
-<label class="fopt" for="f-status-6e6f7468696e672d746f2d646f">
+<label class="fopt" for="f-status-6e6f7468696e672d746f2d646f" data-on="owed" data-applies="owed" data-zero="">
 <input id="f-status-6e6f7468696e672d746f2d646f" type="checkbox" name="status" value="nothing-to-do">
-<span class="fv">Nothing to do now</span>
-<span class="fn">1</span>
+<span class="fv">Nothing to do now <span class="ftag">· reviews you owe</span>
+</span>
+<span class="fn" data-side="all">1</span>
+<span class="fn" data-side="owed">1</span>
+<span class="fn" data-side="mine">
+</span>
 </label>
-<label class="fopt" for="f-status-7265616479">
+<label class="fopt" for="f-status-7265616479" data-on="mine" data-applies="mine" data-zero="">
 <input id="f-status-7265616479" type="checkbox" name="status" value="ready">
-<span class="fv">Ready</span>
-<span class="fn">1</span>
+<span class="fv">Ready <span class="ftag">· your PRs</span>
+</span>
+<span class="fn" data-side="all">1</span>
+<span class="fn" data-side="owed">
+</span>
+<span class="fn" data-side="mine">1</span>
 </label>
 </fieldset>
-<fieldset class="facet">
+<fieldset class="facet" data-on="owed">
 <legend>Author <span class="dim">reviews you owe</span>
 <a class="fall" id="facet-all-author" href="/?author=alice&amp;author=bob&amp;author=carol" data-tick="true">all</a>
 </legend>
-<label class="fopt" for="f-author-616c696365">
+<label class="fopt" for="f-author-616c696365" data-on="owed" data-applies="owed" data-zero="">
 <input id="f-author-616c696365" type="checkbox" name="author" value="alice">
-<span class="fv">@alice</span>
-<span class="fn">1</span>
+<span class="fv">@alice <span class="ftag">· reviews you owe</span>
+</span>
+<span class="fn" data-side="all">1</span>
+<span class="fn" data-side="owed">1</span>
+<span class="fn" data-side="mine">
+</span>
 </label>
-<label class="fopt" for="f-author-626f62">
+<label class="fopt" for="f-author-626f62" data-on="owed" data-applies="owed" data-zero="">
 <input id="f-author-626f62" type="checkbox" name="author" value="bob">
-<span class="fv">@bob</span>
-<span class="fn">1</span>
+<span class="fv">@bob <span class="ftag">· reviews you owe</span>
+</span>
+<span class="fn" data-side="all">1</span>
+<span class="fn" data-side="owed">1</span>
+<span class="fn" data-side="mine">
+</span>
 </label>
-<label class="fopt" for="f-author-6361726f6c">
+<label class="fopt" for="f-author-6361726f6c" data-on="owed" data-applies="owed" data-zero="">
 <input id="f-author-6361726f6c" type="checkbox" name="author" value="carol">
-<span class="fv">@carol</span>
-<span class="fn">1</span>
+<span class="fv">@carol <span class="ftag">· reviews you owe</span>
+</span>
+<span class="fn" data-side="all">1</span>
+<span class="fn" data-side="owed">1</span>
+<span class="fn" data-side="mine">
+</span>
 </label>
 </fieldset>
-<fieldset class="facet">
+<fieldset class="facet" data-on="owed mine">
 <legend>Repo<a class="fall" id="facet-all-repo" href="/?repo=org%2Frepo" data-tick="true">all</a>
 </legend>
-<label class="fopt" for="f-repo-6f72672f7265706f">
+<label class="fopt" for="f-repo-6f72672f7265706f" data-on="owed mine" data-applies="owed mine" data-zero="">
 <input id="f-repo-6f72672f7265706f" type="checkbox" name="repo" value="org/repo">
 <span class="fv">org/repo</span>
-<span class="fn">4</span>
+<span class="fn" data-side="all">4</span>
+<span class="fn" data-side="owed">3</span>
+<span class="fn" data-side="mine">1</span>
 </label>
 </fieldset>
-<fieldset class="facet">
+<fieldset class="facet" data-on="owed mine">
 <legend>State<a class="fall" id="facet-all-state" href="/?state=changes-requested&amp;state=mergeable&amp;state=draft-pr&amp;state=unseen" data-tick="true">all</a>
 </legend>
-<label class="fopt" for="f-state-6368616e6765732d726571756573746564">
+<label class="fopt" for="f-state-6368616e6765732d726571756573746564" data-on="owed mine" data-applies="owed mine" data-zero="mine">
 <input id="f-state-6368616e6765732d726571756573746564" type="checkbox" name="state" value="changes-requested">
 <span class="fv">changes requested</span>
-<span class="fn">1</span>
+<span class="fn" data-side="all">1</span>
+<span class="fn" data-side="owed">1</span>
+<span class="fn" data-side="mine">0</span>
 </label>
-<label class="fopt" for="f-state-6d6572676561626c65">
+<label class="fopt" for="f-state-6d6572676561626c65" data-on="owed mine" data-applies="owed mine" data-zero="owed">
 <input id="f-state-6d6572676561626c65" type="checkbox" name="state" value="mergeable">
 <span class="fv">mergeable</span>
-<span class="fn">1</span>
+<span class="fn" data-side="all">1</span>
+<span class="fn" data-side="owed">0</span>
+<span class="fn" data-side="mine">1</span>
 </label>
-<label class="fopt" for="f-state-64726166742d7072">
+<label class="fopt" for="f-state-64726166742d7072" data-on="owed mine" data-applies="owed mine" data-zero="mine">
 <input id="f-state-64726166742d7072" type="checkbox" name="state" value="draft-pr">
 <span class="fv">draft PR</span>
-<span class="fn">1</span>
+<span class="fn" data-side="all">1</span>
+<span class="fn" data-side="owed">1</span>
+<span class="fn" data-side="mine">0</span>
 </label>
-<label class="fopt" for="f-state-756e7365656e">
+<label class="fopt" for="f-state-756e7365656e" data-on="owed mine" data-applies="owed mine" data-zero="mine">
 <input id="f-state-756e7365656e" type="checkbox" name="state" value="unseen">
 <span class="fv">
 <span class="newdot">
 </span> unseen review</span>
-<span class="fn">1</span>
+<span class="fn" data-side="all">1</span>
+<span class="fn" data-side="owed">1</span>
+<span class="fn" data-side="mine">0</span>
 </label>
 </fieldset>
 </div>

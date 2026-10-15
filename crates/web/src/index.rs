@@ -28,7 +28,7 @@ use tracing::info;
 use crate::{
     App, Error, Shared,
     cells::{LeadPop, ReviewedBy, plural},
-    filter::{self, Facet, IndexQuery, RowValues, Side, count, hidden_line},
+    filter::{self, IndexQuery, RowValues, Side, count, hidden_line},
     hold,
     page::{self, Kind, countdown, csrf_field, drafts, keycap, pr_ref},
     pr_href,
@@ -334,7 +334,11 @@ impl<'a> Listed<'a> {
                 let group = OwedGroup::of(pr, overview);
                 let values = RowValues {
                     list: Side::Owed,
-                    status: group.status(),
+                    statuses: if pr.archived {
+                        vec![group.status(), "archived"]
+                    } else {
+                        vec![group.status()]
+                    },
                     author: Some(&pr.author),
                     reviewers: reviewers(&pr.key),
                     repo: pr.key.repo.to_string(),
@@ -354,7 +358,7 @@ impl<'a> Listed<'a> {
                 let group = (!pr.archived).then(|| MyGroup::of(pr, overview));
                 let values = RowValues {
                     list: Side::Mine,
-                    status: group.map_or("archived", MyGroup::status),
+                    statuses: vec![group.map_or("archived", MyGroup::status)],
                     author: None,
                     reviewers: reviewers(&pr.key),
                     repo: pr.key.repo.to_string(),
@@ -693,7 +697,11 @@ fn owed_list(
                 span.ttl { "Reviews you owe " span.dim { (count(shown.len(), listed.len())) } }
                 (archived_toggle(query, archived))
             }
-            (hidden_line(query, listed.len() - shown.len(), None))
+            (hidden_line(
+                query,
+                listed.len() - shown.len(),
+                filter::not_applied(&query.filter, Side::Owed, &app.me).as_deref(),
+            ))
             @if listed.is_empty() { p.dim { "No reviews requested." } }
             @else if !shown.is_empty() { (columns()) }
             @if !need.0.is_empty() {
@@ -739,13 +747,7 @@ fn my_list(
         (prs, listed.iter().filter(|l| l.group == group).count())
     };
     let archived = overview.mine.iter().filter(|pr| pr.archived).count();
-    // Your PRs are all yours, so an author picked leaves them all.
-    let note = query
-        .filter
-        .picked(Facet::Author)
-        .next()
-        .is_some()
-        .then_some("author isn't applied here: these are all yours");
+    let note = filter::not_applied(&query.filter, Side::Mine, &app.me);
     let back = query.href();
     html! {
         section.list #mine {
@@ -753,7 +755,7 @@ fn my_list(
                 span.ttl { "Your PRs " span.dim { (count(shown.len(), listed.len())) } }
                 (archived_toggle(query, archived))
             }
-            (hidden_line(query, listed.len() - shown.len(), note))
+            (hidden_line(query, listed.len() - shown.len(), note.as_deref()))
             @if listed.is_empty() { p.dim { "No open PRs of yours." } }
             @else if !shown.is_empty() { (columns()) }
             @for (which, heading, act) in [
@@ -1171,6 +1173,34 @@ pub fn archive_form(app: &App, key: &PrKey, archived: bool, back: Option<&str>) 
             } @else {
                 button.btn type="submit" {
                     @if archived { "Unarchive" } @else { "Archive" } (keycap("x"))
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_group_is_a_status_its_list_has() {
+        // A match, so a new group fails to build until it has a status.
+        for group in [OwedGroup::NeedsYou, OwedGroup::InFlight, OwedGroup::Quiet] {
+            match group {
+                OwedGroup::NeedsYou | OwedGroup::InFlight | OwedGroup::Quiet => {
+                    assert!(filter::OWED_STATUSES.contains(&group.status()));
+                }
+            }
+        }
+        for group in [
+            MyGroup::NeedsYou,
+            MyGroup::Ready,
+            MyGroup::WaitingOnReviewers,
+        ] {
+            match group {
+                MyGroup::NeedsYou | MyGroup::Ready | MyGroup::WaitingOnReviewers => {
+                    assert!(filter::MY_STATUSES.contains(&group.status()));
                 }
             }
         }

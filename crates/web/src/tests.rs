@@ -1589,7 +1589,7 @@ async fn the_sidebar_filters_the_lists_from_the_query() {
     assert!(index.contains(
         r#"data-tab="mine" aria-controls="mine" aria-pressed="false">Your PRs <span class="dim">1</span></button>"#
     ));
-    assert!(index.contains("author isn't applied here: these are all yours"));
+    assert!(index.contains("not applied here: @Alice"));
     assert_eq!(headings(&index), ["NEEDS YOU · 1 of 2", "READY · 1"]);
     // The refresh asks for the same, and the tick is kept.
     assert!(index.contains(r#"<div id="panes" hx-get="/?author=Alice""#));
@@ -1621,7 +1621,25 @@ async fn the_sidebar_filters_the_lists_from_the_query() {
     assert!(index.contains(r#"<b class="cnt">0</b> of <b>3</b> pending drafts"#));
     // Each author's count is of what the rest of the filter leaves.
     let alice = &index[index.find(r#"value="alice""#).unwrap()..];
-    assert!(alice[..alice.find("</label>").unwrap()].contains(r#"<span class="fn">0</span>"#));
+    let alice = &alice[..alice.find("</label>").unwrap()];
+    assert!(
+        alice.contains(r#"<span class="fn" data-side="all">0</span>"#),
+        "{alice}"
+    );
+    assert!(alice.contains(r#"<span class="fn" data-side="owed">0</span>"#));
+
+    // A status filters only the list that has it, and the other says so.
+    let index = f.get("/?status=ready").await.body;
+    assert!(index.contains(r#"<span class="ttl">Reviews you owe <span class="dim">3</span>"#));
+    assert!(index.contains("not applied here: Ready"));
+    assert_eq!(
+        headings(&index)[..2],
+        ["NEEDS YOU · 2", "NOTHING TO DO NOW · 1"]
+    );
+    assert_eq!(
+        headings(&index).last().map(String::as_str),
+        Some("READY · 1")
+    );
 
     // Words match the title or the ref.
     let index = f.get("/?q=%239").await.body;

@@ -846,7 +846,9 @@
       const group = document.getElementById(id);
       if (group) group.open = true;
     });
-    const was = refocus && document.getElementById(refocus);
+    let was = refocus && document.getElementById(refocus);
+    // An unticked pick for the other tab comes back hidden; stay in the sidebar.
+    if (was && was.closest("#facets") && !was.getClientRects().length) was = document.getElementById("fq");
     if (was && was !== document.activeElement) was.focus({ preventScroll: true });
     refocus = null;
     localTimes(e.detail.target.isConnected ? e.detail.target : document);
@@ -1148,7 +1150,8 @@
     }
   });
 
-  // A facet's all/none ticks its boxes in place, folded ones too.
+  // A facet's all/none ticks its boxes in place, folded ones and the other
+  // tab's too.
   document.addEventListener("click", function (e) {
     const toggle = e.target.closest("a.fall");
     if (!toggle || !filterForm || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey) return;

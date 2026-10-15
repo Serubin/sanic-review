@@ -1027,9 +1027,23 @@ fonttools (run through `uv`, which only this task needs) to
     value for that facet (a PR nobody has reviewed, a row with no State),
     and a value that turns up later isn't ticked. It's for ticking all
     but a few.
-  - Author filters only the reviews you owe, since your PRs are all
-    yours. While an author is picked, Your PRs says so instead of going
-    empty.
+  - A pick filters only the list that can have it: Author only the
+    reviews you owe, since your PRs are all yours, and a status only the
+    list with that group (In flight and Nothing to do now are reviews
+    you owe; Ready and Waiting on reviewers are yours; Needs you and
+    Archived are both, an archived review you owe being nothing to do
+    as well). A list a facet's picks don't apply to isn't filtered by
+    that facet, and its heading says what isn't applied there.
+  - The sidebar follows the open tab: it shows that list's facets and
+    values and its counts. A pick that doesn't filter the list stays
+    ticked there, dimmed and tagged with the list it's for, to untick.
+    One that does but leaves nothing shows as a value that would.
+    Without the script both lists show, and so do all the values with
+    counts over both. `all`, "N in use", the folded summary and `clear
+    all` are the whole filter's: `all` ticks both lists' values, so
+    unticking one after it narrows only that value's list. Values fold
+    in the same order on both tabs. A status that isn't one filters
+    neither list.
   - The server filters, and the filter is the URL's query
     (`?author=alice&state=unseen&q=retry`), so a filtered index is a
     link. Ticking a value, or typing, rereads the lists in place and puts
